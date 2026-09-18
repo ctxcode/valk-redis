@@ -55,10 +55,14 @@ integers that do not fit, and `verbatim` for text with a format hint in `code`.
 + fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
+// Asks the sentinels where the primary is, and connects to it.
++ fn connect_sentinel(config: SentinelConfig) Connection !Error
 // Opens a connection described by a URL.
 + fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
 // Opens a connection described by a `Config` and logs in.
 + fn connect_with(config: Config) Connection !Error
+// Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
++ fn sentinel_replicas(config: SentinelConfig) Array[String] !Error
 ```
 
 ### config_from_url
@@ -81,6 +85,28 @@ The connection waits forever for a reply once it is up, so that blocking command
 let con = redis.connect("127.0.0.1", 6379) ! panic("%{E.message}")
 ```
 
+### connect_sentinel
+
+Asks the sentinels where the primary is, and connects to it.
+
+Every sentinel is tried in turn: one that cannot be reached, or that does not know the name,
+is passed over. The connection is checked with `ROLE` before it is handed back, so a sentinel
+that is behind on a failover cannot hand you a replica to write to.
+
+```valk
+let con = redis.connect_sentinel(redis.SentinelConfig {
+    sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379" }
+    master_name: "cache"
+}) ! panic("%{E.message}")
+```
+
+A pool opens its connections the same way, so a failover reaches the whole program:
+
+```valk
+global pool: redis.Pool (redis.Pool.new(redis.Config {}, 8))
+// ... or open each connection with connect_sentinel in your own opener
+```
+
 ### connect_url
 
 Opens a connection described by a URL.
@@ -94,6 +120,12 @@ credentials and the database: `rediss://default:secret@cache.example.com:6380/2`
 Opens a connection described by a `Config` and logs in.
 
 `connect`, `connect_url` and `Pool` all end up here.
+
+### sentinel_replicas
+
+Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
+
+The first sentinel that answers is the one that is believed.
 
 ## Classes for 'main'
 
@@ -1547,6 +1579,81 @@ Creates a script. Nothing is sent to a server until it runs.
 #### run
 
 Runs the script and returns its reply.
+
+```js
+// Where to find a primary through Sentinel.
++ class SentinelConfig {
+    // Whether the connection is checked with `ROLE` before it is handed back, so that a sentinel that named a replica is not mistaken for the primary.
+    + check_role: bool
+    // The database to select on the primary.
+    + db: uint
+    // The name the sentinels watch the primary under.
+    + master_name: String
+    // The password of the primary, or "" when it has none.
+    + password: String
+    // The protocol to speak with the primary: 2 or 3.
+    + protocol: uint
+    // The password of the sentinels themselves, if they ask for one.
+    + sentinel_password: String
+    // The sentinels, as `host:port`, tried in the order they are given.
+    + sentinels: Array[String]
+    // How long connecting to a sentinel or to the primary may take, in milliseconds.
+    + timeout_ms: uint
+    // TLS for the primary, or null.
+    + tls: ?TlsOptions
+    // The ACL user of the primary, or "" to log in with the password alone.
+    + username: String
+}
+```
+
+### SentinelConfig
+
+Where to find a primary through Sentinel.
+
+Sentinel is what a redis pair uses to survive losing the primary: the sentinels watch it, and
+when it goes they agree on the replica that takes over. A program asks them where to connect
+rather than remembering an address that may be the wrong one by now.
+
+#### check_role
+
+Whether the connection is checked with `ROLE` before it is handed back, so that a
+sentinel that named a replica is not mistaken for the primary.
+
+#### db
+
+The database to select on the primary.
+
+#### master_name
+
+The name the sentinels watch the primary under.
+
+#### password
+
+The password of the primary, or "" when it has none.
+
+#### protocol
+
+The protocol to speak with the primary: 2 or 3.
+
+#### sentinel_password
+
+The password of the sentinels themselves, if they ask for one.
+
+#### sentinels
+
+The sentinels, as `host:port`, tried in the order they are given.
+
+#### timeout_ms
+
+How long connecting to a sentinel or to the primary may take, in milliseconds.
+
+#### tls
+
+TLS for the primary, or null.
+
+#### username
+
+The ACL user of the primary, or "" to log in with the password alone.
 
 ```js
 // The entries one stream returned from `xread` or `xreadgroup`.

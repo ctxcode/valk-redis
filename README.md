@@ -88,6 +88,32 @@ tls: .{ host: "cache.internal" }             // name to check and to send as SNI
 
 Client certificates are not supported.
 
+## Sentinel
+
+Where a redis pair is watched by sentinels, a program asks them where the primary is rather than
+remembering an address that a failover may have made wrong:
+
+```rust
+let con = redis.connect_sentinel(redis.SentinelConfig {
+    sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379", "10.0.0.3:26379" }
+    master_name: "cache"
+    password: "secret"
+}) ! panic("%{E.message}")
+```
+
+Every sentinel is tried in turn, and one that cannot be reached or does not know the name is
+passed over. The connection is then checked with `ROLE`, so a sentinel that is behind on a
+failover cannot hand you a replica to write to; `check_role: false` turns that off.
+
+`redis.sentinel_replicas(config)` lists the replicas the sentinels know, as `host:port`, for
+reads that may be a moment behind the primary. A pool that opens its connections with
+`connect_sentinel` follows a failover by itself, since each new connection asks again:
+
+```rust
+global pool: sql.Pool (…)   // or, for redis:
+let con = redis.connect_sentinel(config) ! …
+```
+
 ## Pools
 
 A `Pool` opens connections as they are needed and hands them out again afterwards. It belongs
@@ -263,16 +289,20 @@ Every method throws `redis.Error`:
 
 ## Development
 
-`make server` starts two Redis servers in docker, a plain one on port 6399 and one that only
-accepts TLS on 6400 with a self-signed certificate it generates; `make server-down` removes
-them again. `make test` runs the suite against both, using database 9. `make example` builds and runs the
+`make server` starts the Redis servers in docker: a plain one on 6399, one that only accepts TLS
+on 6400 with a self-signed certificate it generates, and a primary on 6401 with a replica on 6402
+and a sentinel on 6403 watching them. `make server-down` removes them again. `make test` runs the
+suite against all of it, using database 9.
+
+`REDIS_FAILOVER_TEST=1 make test` also stops the primary and waits for the sentinel to promote
+the replica, which takes a few seconds; it puts the node back afterwards. `make example` builds and runs the
 example, `make lint` checks the sources and `make docs` regenerates the API documentation.
 Override the compiler with `make vc=/path/to/valk test`.
 
 ## Not supported
 
-Cluster mode (`MOVED` and `ASK` redirects across nodes) and Sentinel are not implemented: a
-connection talks to one server. A cluster answer is not passed through as a raw reply, though:
+Cluster mode (`MOVED` and `ASK` redirects across nodes) is not implemented: a connection talks to
+one server. Sentinel is, see above. A cluster answer is not passed through as a raw reply, though:
 it throws `cluster`, with `error_code` set to the word the server used and a message saying
 which node the key belongs to, or why the command cannot run as written. So a cluster is
 diagnosed in one line rather than as a puzzling `MOVED 3999 10.0.0.2:6381`. Client certificates for TLS are not supported either, since

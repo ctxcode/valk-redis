@@ -28,10 +28,14 @@ Namespaces: [main](#main)
 + fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
+// Asks the sentinels where the primary is, and connects to it.
++ fn connect_sentinel(config: SentinelConfig) Connection !Error
 // Opens a connection described by a URL.
 + fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
 // Opens a connection described by a `Config` and logs in.
 + fn connect_with(config: Config) Connection !Error
+// Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
++ fn sentinel_replicas(config: SentinelConfig) Array[String] !Error
 ```
 
 ## Classes for 'main'
@@ -477,6 +481,32 @@ Namespaces: [main](#main)
     + static fn new(source: String) Script
     // Runs the script and returns its reply.
     + fn run(con: Connection, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
+}
+```
+
+```js
+// Where to find a primary through Sentinel.
++ class SentinelConfig {
+    // Whether the connection is checked with `ROLE` before it is handed back, so that a sentinel that named a replica is not mistaken for the primary.
+    + check_role: bool
+    // The database to select on the primary.
+    + db: uint
+    // The name the sentinels watch the primary under.
+    + master_name: String
+    // The password of the primary, or "" when it has none.
+    + password: String
+    // The protocol to speak with the primary: 2 or 3.
+    + protocol: uint
+    // The password of the sentinels themselves, if they ask for one.
+    + sentinel_password: String
+    // The sentinels, as `host:port`, tried in the order they are given.
+    + sentinels: Array[String]
+    // How long connecting to a sentinel or to the primary may take, in milliseconds.
+    + timeout_ms: uint
+    // TLS for the primary, or null.
+    + tls: ?TlsOptions
+    // The ACL user of the primary, or "" to log in with the password alone.
+    + username: String
 }
 ```
 

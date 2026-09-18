@@ -1,0 +1,142 @@
+use redis
+
+use valk.core
+use valk.time
+// The sentinel setup started by tests/server.sh
+value SENTINEL_PORT ("6403")
+value PRIMARY_PORT (6401)
+value REPLICA_PORT (6402)
+
+fn sentinel_config() redis.SentinelConfig {
+    return redis.SentinelConfig {
+        sentinels: .{ "127.0.0.1:" + SENTINEL_PORT }
+        master_name: "valk-test"
+        db: TEST_DB
+    }
+}
+
+test "Connecting through Sentinel" {
+    let con = redis.connect_sentinel(sentinel_config()) ! {
+        println("connect: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    // It is the primary the sentinel named, and it takes writes. Which of the two nodes that is
+    // depends on whether there has been a failover, so the test asks what it is rather than
+    // assuming it.
+    assert(con.config.port == PRIMARY_PORT || con.config.port == REPLICA_PORT)
+    con.set("sentinel:key", "written through sentinel") ! { println(E.message) assert(false) return }
+    assert((con.get("sentinel:key") !? null) == "written through sentinel")
+
+    // Which is what ROLE says it is
+    let role = con.run(.{ "ROLE" }) ! { assert(false) return }
+    assert((role.get(0) ! { assert(false) return }).to_string() == "master")
+
+    con.del("sentinel:key") ! { assert(false) return }
+}
+
+test "A sentinel that cannot be reached is passed over" {
+    let config = sentinel_config()
+    // The first two are not there; the third is
+    config.sentinels = .{ "127.0.0.1:6300", "127.0.0.1:6301", "127.0.0.1:" + SENTINEL_PORT }
+
+    let con = redis.connect_sentinel(config) ! {
+        println("connect: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    assert(con.ping())
+}
+
+test "When no sentinel can name the primary" {
+    // A name nobody watches
+    let unknown = sentinel_config()
+    unknown.master_name = "not-watched-by-anyone"
+    redis.connect_sentinel(unknown) ! {
+        assert(error_is(E.code, connect))
+        assert(E.message.contains("not-watched-by-anyone"))
+        assert(E.message.contains("does not watch"))
+    }
+
+    // No sentinel at all
+    let unreachable = sentinel_config()
+    unreachable.sentinels = .{ "127.0.0.1:6300" }
+    redis.connect_sentinel(unreachable) ! {
+        assert(error_is(E.code, connect))
+    }
+
+    // An empty list says so rather than looking for one
+    let none = sentinel_config()
+    none.sentinels = .{}
+    redis.connect_sentinel(none) ! {
+        assert(error_is(E.code, connect))
+        assert(E.message.contains("No sentinel was given"))
+        return
+    }
+    assert(false)
+}
+
+test "The replicas the sentinels know" {
+    let replicas = redis.sentinel_replicas(sentinel_config()) ! {
+        println("replicas: " + E.message)
+        assert(false)
+        return
+    }
+    assert(replicas.length == 1)
+    let address = replicas.get(0) !? ""
+    assert(address.starts_with("127.0.0.1:"))
+
+    // The one they name is a replica, which says so itself
+    let port = (address.range(10, address.length - 10).to_uint() !? 0).to(u32)
+    let replica = redis.connect("127.0.0.1", port, "", TEST_DB) ! { assert(false) return }
+    defer replica.close()
+    let role = replica.run(.{ "ROLE" }) ! { assert(false) return }
+    assert((role.get(0) ! { assert(false) return }).to_string() == "slave")
+
+    // And refuses writes, which is why a program asks the sentinels for the primary
+    replica.set("sentinel:write", "x") ! {
+        assert(error_is(E.code, server))
+        return
+    }
+    assert(false)
+}
+
+// Stopping the primary takes a few seconds to be noticed, so this one only runs when it is asked
+// for: REDIS_FAILOVER_TEST=1 make test
+synctest "A failover reaches the next connection" {
+    if (core.getenv("REDIS_FAILOVER_TEST") !? "") != "1" : return
+
+    let config = sentinel_config()
+    let before = redis.connect_sentinel(config) ! { println(E.message) assert(false) return }
+    let stopped_port = before.config.port
+    before.close()
+
+    let name = stopped_port == PRIMARY_PORT ? "valk-redis-master" : "valk-redis-replica"
+    let code, output = core.exec("docker stop " + name)
+    assert(code == 0)
+
+    // The sentinel notices within a second and promotes the other one
+    let promoted: uint = 0
+    let attempt: uint = 0
+    while attempt++ < 30 {
+        time.sleep_ms(1000)
+        let con = redis.connect_sentinel(config) ! continue
+        con.set("failover:key", "written after the failover") ! {
+            con.close()
+            continue
+        }
+        promoted = con.config.port.to(uint)
+        con.del("failover:key") _
+        con.close()
+        break
+    }
+    assert(promoted > 0)
+    assert(promoted != stopped_port.to(uint))
+
+    // Put it back, as a replica of whoever won
+    let started, started_output = core.exec("docker start " + name)
+    time.sleep_ms(1000)
+}

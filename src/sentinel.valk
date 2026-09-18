@@ -1,0 +1,140 @@
+/// Where to find a primary through Sentinel.
+///
+/// Sentinel is what a redis pair uses to survive losing the primary: the sentinels watch it, and
+/// when it goes they agree on the replica that takes over. A program asks them where to connect
+/// rather than remembering an address that may be the wrong one by now.
++ class SentinelConfig {
+    /// The sentinels, as `host:port`, tried in the order they are given.
+    + sentinels: Array[String]
+    /// The name the sentinels watch the primary under.
+    + master_name: String ("mymaster")
+    /// The password of the primary, or "" when it has none.
+    + password: String ("")
+    /// The ACL user of the primary, or "" to log in with the password alone.
+    + username: String ("")
+    /// The database to select on the primary.
+    + db: uint (0)
+    /// How long connecting to a sentinel or to the primary may take, in milliseconds.
+    + timeout_ms: uint (5000)
+    /// The protocol to speak with the primary: 2 or 3.
+    + protocol: uint (2)
+    /// TLS for the primary, or null.
+    + tls: ?TlsOptions (null)
+    /// The password of the sentinels themselves, if they ask for one.
+    + sentinel_password: String ("")
+    /// Whether the connection is checked with `ROLE` before it is handed back, so that a
+    /// sentinel that named a replica is not mistaken for the primary.
+    + check_role: bool (true)
+}
+
+/// Asks the sentinels where the primary is, and connects to it.
+///
+/// Every sentinel is tried in turn: one that cannot be reached, or that does not know the name,
+/// is passed over. The connection is checked with `ROLE` before it is handed back, so a sentinel
+/// that is behind on a failover cannot hand you a replica to write to.
+///
+/// ```valk
+/// let con = redis.connect_sentinel(redis.SentinelConfig {
+///     sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379" }
+///     master_name: "cache"
+/// }) ! panic("%{E.message}")
+/// ```
+///
+/// A pool opens its connections the same way, so a failover reaches the whole program:
+///
+/// ```valk
+/// global pool: redis.Pool (redis.Pool.new(redis.Config {}, 8))
+/// // ... or open each connection with connect_sentinel in your own opener
+/// ```
++ fn connect_sentinel(config: SentinelConfig) Connection !Error {
+    if config.sentinels.length == 0 : throw .connect { message: "No sentinel was given to ask" }
+
+    let last_message = ""
+    each config.sentinels as address {
+        let host, port = split_address(address)
+        let sentinel = connect(host, port, config.sentinel_password, 0, "", config.timeout_ms) ! {
+            last_message = "%{address}: " + E.message
+            continue
+        }
+
+        let answer = sentinel.run(.{ "SENTINEL", "get-master-addr-by-name", config.master_name }) ! {
+            last_message = "%{address}: " + E.message
+            sentinel.close()
+            continue
+        }
+        sentinel.close()
+
+        if answer.is_null() || answer.count < 2 {
+            last_message = "%{address} does not watch '" + config.master_name + "'"
+            continue
+        }
+        let primary_host = (answer.get(0) !? Value.null()).to_string()
+        let primary_port = (answer.get(1) !? Value.null()).to_uint().to(u32)
+
+        let con = connect_with(Config {
+            host: primary_host
+            port: primary_port
+            password: config.password
+            username: config.username
+            db: config.db
+            timeout_ms: config.timeout_ms
+            protocol: config.protocol
+            tls: config.tls
+        }) ! {
+            last_message = "%{primary_host}:%{primary_port}: " + E.message
+            continue
+        }
+
+        if !config.check_role : return con
+        if is_master(con) : return con
+        // A sentinel that is behind on a failover names a replica; the next one may know better
+        last_message = "%{primary_host}:%{primary_port} is not the primary"
+        con.close()
+    }
+
+    throw .connect {
+        message: "No sentinel could name a primary for '" + config.master_name + "'" + (last_message.length > 0 ? ": " + last_message : "")
+    }
+}
+
+/// Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
+///
+/// The first sentinel that answers is the one that is believed.
++ fn sentinel_replicas(config: SentinelConfig) Array[String] !Error {
+    each config.sentinels as address {
+        let host, port = split_address(address)
+        let sentinel = connect(host, port, config.sentinel_password, 0, "", config.timeout_ms) ! continue
+        let answer = sentinel.run(.{ "SENTINEL", "replicas", config.master_name }) ! {
+            sentinel.close()
+            continue
+        }
+        sentinel.close()
+
+        let out = Array[String]{}
+        each answer.to_array() as replica {
+            let fields = replica.to_string_map()
+            let ip = fields.get("ip") !? ""
+            let replica_port = fields.get("port") !? ""
+            let flags = fields.get("flags") !? ""
+            // A replica the sentinels have given up on is no use to read from
+            if flags.contains("s_down") || flags.contains("disconnected") : continue
+            if ip.length > 0 && replica_port.length > 0 : out.append(ip + ":" + replica_port)
+        }
+        return out
+    }
+    throw .connect { message: "No sentinel could be reached" }
+}
+
+// `ROLE` answers with the kind first: `master` on a primary
+fn is_master(con: Connection) bool {
+    let answer = con.run(.{ "ROLE" }) !? Value.null()
+    return (answer.get(0) !? Value.null()).to_string() == "master"
+}
+
+fn split_address(address: String) (String, u32) {
+    let colon = address.index_of_byte(':') !? 0
+    if colon == 0 : return (address, 26379)
+    let host = address.range(0, colon)
+    let port = (address.range(colon + 1, address.length - colon - 1).to_uint() !? 26379).to(u32)
+    return (host, port)
+}
