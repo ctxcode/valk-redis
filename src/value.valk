@@ -1,0 +1,237 @@
+use valk.json
+
+/// The kinds of `Value`.
+///
+/// `string`, `int`, `array` and `null` are what RESP2 servers send. The others are RESP3
+/// types (`redis.connect(..., protocol: 3)`): `float` for doubles, `bool` for `#t`/`#f`,
+/// `map` for maps, `set` for sets, `push` for out-of-band messages, `big_number` for
+/// integers that do not fit, and `verbatim` for text with a format hint in `code`.
++ enum TYPE {
+    null
+    string
+    int
+    float
+    bool
+    array
+    map
+    set
+    push
+    error
+    big_number
+    verbatim
+}
+
+/// A reply from the server, or one item of a reply.
+///
+/// Bulk and simple strings both become `string`, so `to_string()` is what most replies need.
+/// Aggregate replies keep their parts in `items`; `to_strings()` and `to_map()` turn those
+/// into the usual shapes. A RESP2 `HGETALL` sends a flat array and a RESP3 one sends a map,
+/// and `to_map()` reads both.
++ class Value {
+    /// Which of the kinds this value is.
+    + type: TYPE
+    int_value: int (0)
+    float_value: float (0)
+    string_value: String ("")
+    bool_value: bool (false)
+    /// The parts of an `array`, `set`, `push` or `map` reply, null otherwise. A `map` keeps
+    /// its keys and values as one flat list: key, value, key, value, ...
+    + items: ?Array[Value]
+    /// The first word of an error reply, such as `WRONGTYPE`, or the three letter format of a
+    /// verbatim string, such as `txt`. Empty for every other kind.
+    + code: String ("")
+
+    /// Returns a null value, what the server sends for a missing key.
+    + static fn null() Value {
+        return Value { type: TYPE.null }
+    }
+    /// Returns a string value, what most replies are.
+    + static fn of(text: String) Value {
+        return Value { type: TYPE.string, string_value: text }
+    }
+    /// Returns an integer value.
+    + static fn of_int(number: int) Value {
+        return Value { type: TYPE.int, int_value: number }
+    }
+    /// Returns a floating point value.
+    + static fn of_float(number: float) Value {
+        return Value { type: TYPE.float, float_value: number }
+    }
+    /// Returns a bool value.
+    + static fn of_bool(value: bool) Value {
+        return Value { type: TYPE.bool, bool_value: value }
+    }
+    /// Returns an array value holding `items`.
+    + static fn of_array(items: Array[Value]) Value {
+        return Value { type: TYPE.array, items: items }
+    }
+
+    /// Returns whether this is the null reply.
+    + fn is_null() bool {
+        return this.type == TYPE.null
+    }
+    /// Returns whether this is an error reply. Only replies nested in an array can be errors;
+    /// a command that fails throws `server` instead.
+    + fn is_error() bool {
+        return this.type == TYPE.error
+    }
+    /// Returns whether this reply holds several items (`array`, `set`, `map` or `push`).
+    + fn is_array() bool {
+        let type = this.type
+        return type == TYPE.array || type == TYPE.set || type == TYPE.map || type == TYPE.push
+    }
+
+    /// Returns the number of items of an aggregate reply, or 0 for every other kind.
+    + get count: uint {
+        let items = this.items
+        if !isset(items) : return 0
+        return items.length
+    }
+
+    /// Returns the item at `index`. Backs `value[0]`.
+    ///
+    /// Throws `missing` when the reply has no such item.
+    + fn get(index: uint) Value !LookupError $offset {
+        let items = this.items
+        if !isset(items) : throw .missing
+        return items.get(index) !>
+    }
+
+    /// Returns the value as text: the bytes of a string reply, the digits of a number, `1` or
+    /// `0` for a bool, the message of an error, and "" for null and for aggregates.
+    + fn to_string() String $auto {
+        let type = this.type
+        if type == TYPE.string || type == TYPE.verbatim || type == TYPE.big_number : return this.string_value
+        if type == TYPE.error : return this.string_value
+        if type == TYPE.int : return this.int_value.to(String)
+        if type == TYPE.float : return this.float_value.to_shortest_string()
+        if type == TYPE.bool : return this.bool_value ? "1" : "0"
+        return ""
+    }
+    /// Like `to_string`, but null for the null reply, which is how a missing key is told apart
+    /// from an empty one.
+    + fn to_string_or_null() ?String {
+        if this.type == TYPE.null : return null
+        return this.to_string()
+    }
+    /// Returns the value as an integer; text is parsed, floats are truncated, null is 0.
+    + fn to_int() int {
+        let type = this.type
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.float : return this.float_value.to(int)
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        if type == TYPE.string || type == TYPE.big_number || type == TYPE.verbatim {
+            return this.string_value.to_int() !? (this.string_value.to_float() !? 0).to(int)
+        }
+        return 0
+    }
+    /// Returns the value as an unsigned integer; negative numbers become 0.
+    + fn to_uint() uint {
+        let v = this.to_int()
+        if v < 0 : return 0
+        return v.to(uint)
+    }
+    /// Returns the value as a float; text is parsed, null is 0.
+    + fn to_float() float {
+        let type = this.type
+        if type == TYPE.float : return this.float_value
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        if type == TYPE.string || type == TYPE.big_number || type == TYPE.verbatim {
+            return this.string_value.to_float() !? 0
+        }
+        return 0
+    }
+    /// Returns the value as a bool: a RESP3 bool as it is, `OK` and any number other than 0 as
+    /// true, null and everything else as false.
+    + fn to_bool() bool {
+        let type = this.type
+        if type == TYPE.bool : return this.bool_value
+        if type == TYPE.int : return this.int_value != 0
+        if type == TYPE.float : return this.float_value != 0
+        if type == TYPE.string {
+            let s = this.string_value
+            return s == "OK" || s == "1" || s == "true"
+        }
+        return false
+    }
+
+    /// Returns the items of an aggregate reply, or an empty array.
+    + fn to_array() Array[Value] {
+        let items = this.items
+        if !isset(items) : return .{}
+        return items
+    }
+    /// Returns every item as text. Null items become "".
+    + fn to_strings() Array[String] {
+        let items = this.items
+        if !isset(items) : return .{}
+        let out = Array[String].new(items.length)
+        each items as item {
+            out.append(item.to_string())
+        }
+        return out
+    }
+    /// Returns every item as text, keeping null items as null. `MGET` uses this.
+    + fn to_strings_or_null() Array[?String] {
+        let items = this.items
+        if !isset(items) : return .{}
+        let out = Array[?String].new(items.length)
+        each items as item {
+            out.append(item.to_string_or_null())
+        }
+        return out
+    }
+    /// Returns every item as an integer.
+    + fn to_ints() Array[int] {
+        let items = this.items
+        if !isset(items) : return .{}
+        let out = Array[int].new(items.length)
+        each items as item {
+            out.append(item.to_int())
+        }
+        return out
+    }
+
+    /// Reads a field/value reply, such as `HGETALL` or `CONFIG GET`, as a map.
+    ///
+    /// Works for both the flat array RESP2 sends and the map RESP3 sends. An odd number of
+    /// items drops the last one.
+    + fn to_map() Map[Value] {
+        let items = this.items
+        let out: Map[Value] = .{}
+        if !isset(items) : return out
+        let i: uint = 0
+        while i + 1 < items.length {
+            let key = items.get(i) !? Value.null()
+            let value = items.get(i + 1) !? Value.null()
+            out.set(key.to_string(), value)
+            i += 2
+        }
+        return out
+    }
+    /// The same as `to_map`, with the values as text.
+    + fn to_string_map() Map[String] {
+        let items = this.items
+        let out: Map[String] = .{}
+        if !isset(items) : return out
+        let i: uint = 0
+        while i + 1 < items.length {
+            let key = items.get(i) !? Value.null()
+            let value = items.get(i + 1) !? Value.null()
+            out.set(key.to_string(), value.to_string())
+            i += 2
+        }
+        return out
+    }
+
+    /// Parses the value as JSON. Returns json null when the text is not valid JSON.
+    + fn to_json() json.Value {
+        let type = this.type
+        if type == TYPE.int : return json.new_int(this.int_value)
+        if type == TYPE.float : return json.new_float(this.float_value)
+        if type == TYPE.bool : return json.new_bool(this.bool_value)
+        if type == TYPE.null : return json.new_null()
+        return json.decode(this.to_string()) !? json.new_null()
+    }
+}

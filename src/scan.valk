@@ -1,0 +1,117 @@
+extend Connection {
+
+    /// Reads one page of the keyspace.
+    ///
+    /// Returns the cursor for the next page and the keys of this one. Start at cursor 0 and
+    /// stop when the returned cursor is 0 again. A page may be empty while more pages follow,
+    /// and a key may show up twice, so `scan_iter` is usually the easier way.
+    + fn scan(cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[String]) !Error {
+        let reply = this.scan_command("SCAN", "", cursor, pattern, count) !>
+        return (scan_cursor(reply), scan_items(reply).to_strings())
+    }
+
+    /// Walks every key of the database, a page at a time.
+    ///
+    /// Unlike `keys`, this never blocks the server for long. A key that exists the whole time is
+    /// returned at least once; one that is added or removed while the walk runs may or may not
+    /// show up.
+    ///
+    /// ```valk
+    /// let keys = con.scan_iter("session:*")
+    /// while true {
+    ///     let key = keys.next() ! panic("%{E.message}")
+    ///     if !isset(key) : break
+    ///     println(key)
+    /// }
+    /// ```
+    + fn scan_iter(pattern: String (""), count: uint (0)) ScanIterator {
+        return ScanIterator { con: this, command: "SCAN", key: "", pattern: pattern, count: count }
+    }
+
+    /// Reads one page of a set.
+    + fn sscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[String]) !Error {
+        let reply = this.scan_command("SSCAN", key, cursor, pattern, count) !>
+        return (scan_cursor(reply), scan_items(reply).to_strings())
+    }
+
+    /// Walks every member of a set, a page at a time.
+    + fn sscan_iter(key: String, pattern: String (""), count: uint (0)) ScanIterator {
+        return ScanIterator { con: this, command: "SSCAN", key: key, pattern: pattern, count: count }
+    }
+
+    /// Reads one page of a hash, as fields with their values.
+    + fn hscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Map[String]) !Error {
+        let reply = this.scan_command("HSCAN", key, cursor, pattern, count) !>
+        return (scan_cursor(reply), scan_items(reply).to_string_map())
+    }
+
+    /// Reads one page of a sorted set, as members with their scores.
+    + fn zscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[ScoredMember]) !Error {
+        let reply = this.scan_command("ZSCAN", key, cursor, pattern, count) !>
+        return (scan_cursor(reply), scored_members(scan_items(reply)))
+    }
+
+    fn scan_command(command: String, key: String, cursor: uint, pattern: String, count: uint) Value !Error {
+        let args = Array[String]{ command }
+        if key.length > 0 : args.append(key)
+        args.append(cursor)
+        if pattern.length > 0 {
+            args.append("MATCH")
+            args.append(pattern)
+        }
+        if count > 0 {
+            args.append("COUNT")
+            args.append(count)
+        }
+        return this.run(args) !>
+    }
+}
+
+// A scan reply is the next cursor and the items of this page
+fn scan_cursor(reply: Value) uint {
+    return (reply.get(0) !? Value.null()).to_uint()
+}
+fn scan_items(reply: Value) Value {
+    return reply.get(1) !? Value.null()
+}
+
+/// Walks the keys of a database, or the members of a set, one page at a time.
+///
+/// `next` returns null once the walk is over. The iterator holds its connection, so no other
+/// command may run on that connection while it is walking.
++ class ScanIterator {
+    con: Connection
+    command: String
+    key: String
+    pattern: String
+    count: uint
+    cursor: uint (0)
+    page: Array[String] (.{})
+    index: uint (0)
+    started: bool (false)
+
+    /// Returns the next key or member, or null at the end.
+    + fn next() ?String !Error {
+        while true {
+            if this.index < this.page.length : return this.page.get(this.index++) !? null
+            if this.started && this.cursor == 0 : return null
+            let reply = this.con.scan_command(this.command, this.key, this.cursor, this.pattern, this.count) !>
+            this.cursor = scan_cursor(reply)
+            this.page = scan_items(reply).to_strings()
+            this.index = 0
+            this.started = true
+        }
+    }
+
+    /// Returns everything that is left in one array.
+    ///
+    /// Only safe on a keyspace small enough to hold in memory; that is what `next` is for.
+    + fn all() Array[String] !Error {
+        let out: Array[String] = .{}
+        while true {
+            let value = this.next() !>
+            if !isset(value) : return out
+            out.append(value)
+        }
+    }
+}

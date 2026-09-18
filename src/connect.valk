@@ -1,0 +1,328 @@
+use valk.net
+
+// Bytes asked from the socket per read
+value RECV_CHUNK (65536)
+// How deep a reply may nest before it is refused
+value MAX_DEPTH (64)
+
+/// Opens a connection and logs in.
+///
+/// `password` and `username` are only sent when they are given: a server without a password
+/// needs neither, a server with `requirepass` needs the password alone, and an ACL user needs
+/// both. `protocol` 3 asks for RESP3 with `HELLO`, which needs Redis 6 or newer; the default 2
+/// works with every version and every command of this package.
+///
+/// The connection waits forever for a reply once it is up, so that blocking commands such as
+/// `blpop` work; `set_timeouts` changes that.
++ fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error {
+    let sock = net.tcp_client(host, port.to(u16), timeout_ms) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+
+    let con = Connection {
+        con: sock
+        host: host
+        port: port
+        username: username
+        password: password
+        db: db
+        protocol: protocol
+    }
+    // A blocking command may wait for a long time; connecting had its own timeout
+    sock.set_timeouts(0, 0)
+
+    con.init() ! {
+        con.close()
+        throw E
+    }
+    con.password = "" // clear from memory
+
+    return con
+}
+
+/// A connection to one server.
+///
+/// A connection carries one command at a time, so it belongs to one coroutine or one thread.
+/// Give every worker its own.
++ class Connection {
+    con: net.TcpConnection
+    //
+    /// The host this connection was opened to.
+    ~ host: String
+    /// The port this connection was opened to.
+    ~ port: u32
+    username: String
+    password: String
+    /// The database this connection selected.
+    ~ db: uint
+    /// The protocol version in use: 2 or 3.
+    ~ protocol: uint
+    // Data in
+    data_in: ByteBuffer (.new())
+    read_offset: uint (0) // Start of the unread bytes in data_in; everything before was consumed
+    // Data out
+    out: ByteBuffer (.new()) // Commands waiting for flush()
+    /// Server properties reported by `HELLO`, such as `version` and `role`. Empty on RESP2.
+    ~ server_info: Map[String] (.{})
+    /// Out-of-band messages that arrived between commands, oldest first. `next_message` takes
+    /// them from here.
+    pushes: Array[Value] (.{})
+    /// How many channels and patterns this connection is subscribed to.
+    ~+ subscriptions: uint (0)
+    /// Prints every command and reply when true.
+    + debug: bool (false)
+    /// Whether `close` was called, or the server closed the connection.
+    ~ closed: bool (false)
+
+    fn init() !Error {
+        if this.protocol != 2 && this.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
+        if this.protocol == 3 {
+            let args = Array[String]{ "HELLO", "3" }
+            if this.password.length > 0 {
+                args.append("AUTH")
+                args.append(this.username.length > 0 ? this.username : "default")
+                args.append(this.password)
+            }
+            let reply = this.run(args) ! {
+                if error_is(E.code, server) : throw .auth { message: E.message, error_code: E.error_code }
+                throw E
+            }
+            this.server_info = reply.to_string_map()
+        } else if this.password.length > 0 {
+            let args = Array[String]{ "AUTH" }
+            if this.username.length > 0 : args.append(this.username)
+            args.append(this.password)
+            this.run(args) ! {
+                if error_is(E.code, server) : throw .auth { message: E.message, error_code: E.error_code }
+                throw E
+            }
+        }
+        if this.db > 0 : this.select(this.db) !>
+    }
+
+    /// Selects another database.
+    + fn select(db: uint) !Error {
+        this.run(.{ "SELECT", db }) !>
+        this.db = db
+    }
+
+    /// Sends `PING` and returns whether the server answered.
+    + fn ping() bool {
+        let reply = this.run(.{ "PING" }) !? Value.null()
+        return reply.to_string() == "PONG"
+    }
+
+    /// Sets the socket read and write timeouts in milliseconds; 0 waits forever (the default).
+    ///
+    /// A read that runs out of time throws `timeout` and leaves the reply where it was, so the
+    /// connection has to be closed afterwards. Blocking commands take their own timeout instead.
+    + fn set_timeouts(read_timeout_ms: uint, write_timeout_ms: uint) {
+        this.con.set_timeouts(read_timeout_ms, write_timeout_ms)
+    }
+
+    /// Closes the connection. Further commands throw `closed`.
+    + fn close() {
+        if this.closed : return
+        this.closed = true
+        this.write_command(.{ "QUIT" })
+        this.flush() _
+        this.con.close() _
+    }
+
+    //
+    // Sending
+    //
+
+    /// Runs one command and returns its reply, for commands this package has no method for.
+    ///
+    /// The first item is the command name, the rest are its arguments; numbers convert to text
+    /// on their own. An error reply throws `server`.
+    ///
+    /// ```valk
+    /// con.run(.{ "SET", "visits", 1, "EX", 60 }) ! panic("%{E.message}")
+    /// let visits = con.run(.{ "GET", "visits" }) ! panic("%{E.message}")
+    /// println(visits.to_int())
+    /// ```
+    + fn run(args: Array[String]) Value !Error {
+        let reply = this.run_raw(args) !>
+        if reply.type == TYPE.error : throw .server { message: reply.string_value, error_code: reply.code }
+        return reply
+    }
+
+    /// The same as `run`, but an error reply is returned as a `Value` of type `error` instead
+    /// of thrown.
+    + fn run_raw(args: Array[String]) Value !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        this.write_command(args)
+        this.flush() !>
+        return this.receive() !>
+    }
+
+    // Writes one command into the output buffer as a RESP array of bulk strings
+    fn write_command(args: Array[String]) {
+        let out = this.out
+        out.write_byte('*')
+        out.write_uint_ascii(args.length)
+        out.write("\r\n")
+        each args as arg {
+            out.write_byte('$')
+            out.write_uint_ascii(arg.length)
+            out.write("\r\n")
+            out.write(arg)
+            out.write("\r\n")
+        }
+        if this.debug : println("SEND " + args.join(" "))
+    }
+
+    // Sends everything written so far
+    fn flush() !Error {
+        let out = this.out
+        if out.length == 0 : return
+        this.con.write(out) ! {
+            out.clear()
+            this.closed = true
+            if error_is(E.code, closed) : throw .closed { message: "The connection is closed" }
+            throw .connect { message: "Failed to send bytes to the server" }
+        }
+        out.clear()
+    }
+
+    //
+    // Receiving
+    //
+
+    // Reads the next reply. Out-of-band messages are put aside for `next_message`.
+    fn receive() Value !Error {
+        while true {
+            let value = this.read_value(0) !>
+            if value.type == TYPE.push {
+                this.pushes.append(value)
+                continue
+            }
+            return value
+        }
+    }
+
+    // Parses one reply, whatever its type
+    fn read_value(depth: uint) Value !Error {
+        if depth > MAX_DEPTH : throw .protocol { message: "The reply nests deeper than %{MAX_DEPTH} levels" }
+        let line = this.read_line() !>
+        if line.length == 0 : throw .protocol { message: "The server sent an empty line" }
+        let type = line[0]
+        let rest = line.range(1, line.length - 1)
+        if this.debug : println("RECV " + line)
+
+        if type == '+' : return Value { type: TYPE.string, string_value: rest }
+        if type == ':' : return Value { type: TYPE.int, int_value: parse_int(rest) !> }
+        if type == '-' {
+            return Value { type: TYPE.error, string_value: rest, code: first_word(rest) }
+        }
+        if type == '_' : return Value.null() // RESP3 null
+        if type == '#' : return Value { type: TYPE.bool, bool_value: rest == "t" } // RESP3 bool
+        if type == '(' : return Value { type: TYPE.big_number, string_value: rest } // RESP3 big number
+        // RESP3 double; `inf`, `-inf` and `nan` parse as themselves
+        if type == ',' : return Value { type: TYPE.float, float_value: rest.to_float() !? 0 }
+        if type == '$' || type == '=' || type == '!' {
+            let length = parse_int(rest) !>
+            if length < 0 : return Value.null() // RESP2 null bulk string
+            let data = this.read_bytes(length.to(uint)) !>
+            if type == '!' : return Value { type: TYPE.error, string_value: data, code: first_word(data) }
+            if type == '=' {
+                // Verbatim string: three letters, a colon, then the text
+                if data.length >= 4 && data[3] == ':' {
+                    return Value { type: TYPE.verbatim, string_value: data.range(4, data.length - 4), code: data.range(0, 3) }
+                }
+                return Value { type: TYPE.verbatim, string_value: data }
+            }
+            return Value { type: TYPE.string, string_value: data }
+        }
+        if type == '*' || type == '~' || type == '>' || type == '%' {
+            let count = parse_int(rest) !>
+            if count < 0 : return Value.null() // RESP2 null array
+            let items_count = count.to(uint)
+            if type == '%' : items_count *= 2 // A map sends its keys and values as pairs
+            let items = Array[Value].new(items_count)
+            let i: uint = 0
+            while i++ < items_count {
+                let item = this.read_value(depth + 1) !>
+                items.append(item)
+            }
+            let value_type = TYPE.array
+            if type == '~' : value_type = TYPE.set
+            else if type == '>' : value_type = TYPE.push
+            else if type == '%' : value_type = TYPE.map
+            return Value { type: value_type, items: items }
+        }
+        if type == '|' {
+            // RESP3 attributes describe the reply that follows; nothing here uses them
+            let count = parse_int(rest) !>
+            let i: uint = 0
+            while i++ < count.to(uint) * 2 {
+                this.read_value(depth + 1) !>
+            }
+            return this.read_value(depth) !>
+        }
+        throw .protocol { message: "The server sent a reply of unknown type '" + type.to_ascii_string() + "'" }
+    }
+
+    // Reads up to the next \r\n and returns the line without it
+    fn read_line() String !Error {
+        // Offsets are relative to read_offset: a fill() compacts the buffer and moves it
+        let searched: uint = 0
+        while true {
+            let buf = this.data_in
+            let start = this.read_offset
+            let found = buf.index_of('\n', start + searched) ! {
+                searched = buf.length - start
+                this.fill() !>
+                continue
+            }
+            let length = found - start
+            if length > 0 && buf.get(found - 1) == '\r' : length--
+            this.read_offset = found + 1
+            return buf.range(start, length)
+        }
+    }
+
+    // Reads `length` bytes plus the \r\n that follows them
+    fn read_bytes(length: uint) String !Error {
+        this.ensure(length + 2) !>
+        let data = this.data_in.range(this.read_offset, length)
+        this.read_offset += length + 2
+        return data
+    }
+
+    // Waits until `amount` unread bytes are in the buffer
+    fn ensure(amount: uint) !Error {
+        while this.data_in.length - this.read_offset < amount {
+            this.fill() !>
+        }
+    }
+
+    // Reads more bytes from the socket. Everything already consumed is dropped first, so the
+    // buffer is compacted once per socket read instead of once per reply.
+    fn fill() !Error {
+        let buf = this.data_in
+        if this.read_offset > 0 {
+            buf.clear_until(this.read_offset)
+            this.read_offset = 0
+        }
+        buf.reserve(RECV_CHUNK)
+        let spare = buf.view_spare(RECV_CHUNK)
+        let count = this.con.read(spare) ! {
+            if error_is(E.code, timeout) : throw .timeout { message: "The server did not answer in time" }
+            this.closed = true
+            if error_is(E.code, closed) : throw .closed { message: "The server closed the connection" }
+            throw .connect { message: "Failed to read bytes from the socket" }
+        }
+        buf.skip(count)
+    }
+}
+
+// The first word of an error reply is its code, such as WRONGTYPE
+fn first_word(text: String) String {
+    let space = text.index_of_byte(' ') !? text.length
+    return text.range(0, space)
+}
+
+fn parse_int(text: String) int !Error {
+    return text.to_int() ! throw .protocol { message: "The server sent '" + text + "' where a number belongs" }
+}

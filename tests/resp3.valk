@@ -1,0 +1,40 @@
+use redis
+
+test "RESP3" {
+    let con = connect(3) ! { println(E.message) assert(false) return }
+    defer con.close()
+    assert(con.protocol == 3)
+    assert((con.server_info.get("proto") !? "") == "3")
+
+    // A hash comes back as a map instead of a flat array; to_map reads both
+    con.del("resp3:hash") ! { assert(false) return }
+    con.hset_many("resp3:hash", .{ "a" => "1", "b" => "2" }) ! { assert(false) return }
+    let reply = con.run(.{ "HGETALL", "resp3:hash" }) ! { assert(false) return }
+    assert(reply.type == redis.TYPE.map)
+    assert(reply.to_map().length == 2)
+    assert((con.hgetall("resp3:hash") !? .{}).length == 2)
+
+    // Doubles and bools have their own types
+    con.del("resp3:zset") ! { assert(false) return }
+    con.zadd("resp3:zset", 1.5, "m") ! { assert(false) return }
+    let score = con.run(.{ "ZSCORE", "resp3:zset", "m" }) ! { assert(false) return }
+    assert(score.to_float() == 1.5)
+    assert(score.type == redis.TYPE.float)
+    con.del("resp3:set") ! { assert(false) return }
+    con.sadd_many("resp3:set", .{ "x", "y" }) ! { assert(false) return }
+    let exists = con.run(.{ "SISMEMBER", "resp3:set", "x" }) ! { assert(false) return }
+    assert(exists.to_bool())
+
+    // A set reply keeps its own type
+    let members = con.run(.{ "SMEMBERS", "resp3:set" }) ! { assert(false) return }
+    assert(members.is_array())
+    assert(members.count == 2)
+
+    // The same typed methods work whatever the protocol is
+    assert((con.get("resp3:missing") !? "x") == null)
+    con.set("resp3:key", "v") ! { assert(false) return }
+    assert((con.get("resp3:key") !? null) == "v")
+    assert((con.incr("resp3:n") !? 0) == 1)
+
+    con.del_many(.{ "resp3:hash", "resp3:zset", "resp3:set", "resp3:key", "resp3:n" }) ! { assert(false) return }
+}

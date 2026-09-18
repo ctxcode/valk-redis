@@ -1,0 +1,57 @@
+/// Several commands sent in one go.
+///
+/// Every command still has to travel to the server, but a pipeline pays for one round trip
+/// instead of one per command, which is what makes a batch of small writes fast. The replies
+/// come back in the order the commands were added.
+///
+/// ```valk
+/// let pipe = con.pipeline()
+/// pipe.add(.{ "SET", "a", 1 })
+/// pipe.add(.{ "INCR", "a" })
+/// let replies = pipe.exec() ! panic("%{E.message}")
+/// println(replies.get(1) !! .to_int()) // 2
+/// ```
++ class Pipeline {
+    con: Connection
+    /// How many commands are waiting to be sent.
+    ~ count: uint (0)
+
+    /// Adds a command. Nothing is sent until `exec`.
+    + fn add(args: Array[String]) SELF {
+        this.con.write_command(args)
+        this.count++
+        return this
+    }
+
+    /// Sends every command added so far and returns their replies in order.
+    ///
+    /// A command that failed is an `error` value in the result rather than a thrown error, so
+    /// that one failure does not hide the replies of the others.
+    + fn exec() Array[Value] !Error {
+        let count = this.count
+        this.count = 0
+        if count == 0 : return .{}
+        if this.con.closed : throw .closed { message: "The connection is closed" }
+        this.con.flush() !>
+        let out = Array[Value].new(count)
+        let i: uint = 0
+        while i++ < count {
+            let reply = this.con.receive() !>
+            out.append(reply)
+        }
+        return out
+    }
+
+    /// Throws away the commands that were added but not sent.
+    + fn clear() {
+        this.con.out.clear()
+        this.count = 0
+    }
+}
+
+extend Connection {
+    /// Starts a pipeline on this connection.
+    + fn pipeline() Pipeline {
+        return Pipeline { con: this }
+    }
+}

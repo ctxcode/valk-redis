@@ -1,0 +1,96 @@
+use redis
+
+
+test "Basics" {
+    let con = connect() ! {
+        println("connect: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    assert(con.ping())
+    assert((con.server_version() !? "") != "")
+
+    // Set and get
+    con.set("basics:name", "valk") ! { println(E.message) assert(false) return }
+    assert((con.get("basics:name") !? null) == "valk")
+    assert(con.exists("basics:name") !? false)
+    assert((con.type_of("basics:name") !? "") == "string")
+    assert((con.strlen("basics:name") !? 0) == 4)
+
+    // A missing key is null, not an empty string
+    con.del("basics:missing") ! { assert(false) return }
+    assert(!isset(con.get("basics:missing") !? "x"))
+
+    // Conditional writes
+    assert(!(con.set("basics:name", "other", 0, 0, true) !? true)) // NX on an existing key
+    assert((con.get("basics:name") !? null) == "valk")
+    assert(con.set("basics:name", "other", 0, 0, false, true) !? false) // XX on an existing key
+    assert((con.get("basics:name") !? null) == "other")
+
+    // Numbers
+    con.del("basics:count") ! { assert(false) return }
+    assert((con.incr("basics:count") !? 0) == 1)
+    assert((con.incr_by("basics:count", 41) !? 0) == 42)
+    assert((con.decr("basics:count") !? 0) == 41)
+    assert((con.decr_by("basics:count", 41) !? -1) == 0)
+    assert((con.incr_by_float("basics:count", 1.5) !? 0) == 1.5)
+
+    // Several keys at once
+    con.mset(.{ "basics:a" => "1", "basics:b" => "2" }) ! { assert(false) return }
+    let values = con.mget(.{ "basics:a", "basics:b", "basics:missing" }) ! { assert(false) return }
+    assert(values.length == 3)
+    assert((values.get(0) !? null) == "1")
+    assert((values.get(1) !? null) == "2")
+    assert(!isset(values.get(2) !? "x"))
+
+    // Lifetimes
+    con.set("basics:temp", "x", 60) ! { assert(false) return }
+    let ttl = con.ttl("basics:temp") !? 0
+    assert(ttl > 0 && ttl <= 60)
+    assert(con.persist("basics:temp") !? false)
+    assert((con.ttl("basics:temp") !? 0) == -1)
+    assert(con.expire("basics:temp", 30) !? false)
+    assert((con.ttl("basics:temp") !? 0) > 0)
+    assert((con.ttl("basics:missing") !? 0) == -2)
+
+    // Append, rename and delete
+    con.set("basics:text", "hello") ! { assert(false) return }
+    assert((con.append("basics:text", " world") !? 0) == 11)
+    con.rename("basics:text", "basics:text2") ! { assert(false) return }
+    assert((con.get("basics:text2") !? null) == "hello world")
+    assert(con.del("basics:text2") !? false)
+    assert(!(con.del("basics:text2") !? true))
+
+    // Binary values keep every byte
+    let binary = "a\x00b\r\nc"
+    con.set("basics:binary", binary) ! { assert(false) return }
+    assert((con.get("basics:binary") !? null) == binary)
+
+    let keys = con.keys("basics:*") !? .{}
+    assert(keys.length > 0)
+    assert((con.dbsize() !? 0) > 0)
+
+    con.del_many(.{ "basics:name", "basics:count", "basics:a", "basics:b", "basics:temp", "basics:binary" }) ! { assert(false) return }
+}
+
+test "Raw commands" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+
+    con.run(.{ "SET", "raw:n", 7 }) ! { assert(false) return }
+    let reply = con.run(.{ "GET", "raw:n" }) ! { assert(false) return }
+    assert(reply.to_int() == 7)
+    assert(reply.to_string() == "7")
+    assert(reply.type == redis.TYPE.string)
+
+    // An unknown command is reported by the server, not by this package
+    con.run(.{ "NOSUCHCOMMAND" }) ! {
+        assert(error_is(E.code, server))
+        assert(E.error_code == "ERR")
+        con.del("raw:n") _
+        return
+    }
+    assert(false)
+}

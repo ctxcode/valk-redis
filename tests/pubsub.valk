@@ -1,0 +1,74 @@
+
+test "Pub sub" {
+    let listener = connect() ! { assert(false) return }
+    defer listener.close()
+    let publisher = connect() ! { assert(false) return }
+    defer publisher.close()
+
+    listener.subscribe(.{ "news", "sports" }) ! { println(E.message) assert(false) return }
+    assert(listener.subscriptions == 2)
+
+    // Nothing published yet
+    assert(!isset(listener.next_message(200) ! { assert(false) return }))
+
+    publisher.publish("news", "hello") ! { assert(false) return }
+    let message = listener.next_message(2000) ! { println(E.message) assert(false) return }
+    assert(isset(message))
+    if isset(message) {
+        assert(message.kind == "message")
+        assert(message.channel == "news")
+        assert(message.data == "hello")
+        assert(message.pattern == "")
+    }
+
+    // Messages keep their order, and binary payloads survive
+    publisher.publish("sports", "first") ! { assert(false) return }
+    publisher.publish("sports", "sec\x00nd") ! { assert(false) return }
+    let first = listener.next_message(2000) ! { assert(false) return }
+    let second = listener.next_message(2000) ! { assert(false) return }
+    if isset(first) : assert(first.data == "first")
+    if isset(second) : assert(second.data == "sec\x00nd")
+
+    listener.unsubscribe(.{ "sports" }) ! { assert(false) return }
+    assert(listener.subscriptions == 1)
+    listener.unsubscribe() ! { assert(false) return }
+    assert(listener.subscriptions == 0)
+}
+
+test "Pattern subscriptions" {
+    let listener = connect() ! { assert(false) return }
+    defer listener.close()
+    let publisher = connect() ! { assert(false) return }
+    defer publisher.close()
+
+    listener.psubscribe(.{ "jobs.*" }) ! { assert(false) return }
+    assert(listener.subscriptions == 1)
+    assert((publisher.publish("jobs.email", "send") !? 0) == 1)
+
+    let message = listener.next_message(2000) ! { assert(false) return }
+    assert(isset(message))
+    if isset(message) {
+        assert(message.kind == "pmessage")
+        assert(message.pattern == "jobs.*")
+        assert(message.channel == "jobs.email")
+        assert(message.data == "send")
+    }
+    listener.punsubscribe() ! { assert(false) return }
+    assert(listener.subscriptions == 0)
+}
+
+test "Pub sub on RESP3" {
+    let listener = connect(3) ! { assert(false) return }
+    defer listener.close()
+    let publisher = connect(3) ! { assert(false) return }
+    defer publisher.close()
+
+    listener.subscribe(.{ "resp3" }) ! { println(E.message) assert(false) return }
+    publisher.publish("resp3", "push") ! { assert(false) return }
+    let message = listener.next_message(2000) ! { assert(false) return }
+    assert(isset(message))
+    if isset(message) : assert(message.data == "push")
+
+    // RESP3 leaves the connection usable for other commands while subscribed
+    assert((listener.run(.{ "PING" }) ! { assert(false) return }).to_string() == "PONG")
+}

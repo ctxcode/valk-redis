@@ -1,0 +1,84 @@
+use redis
+
+test "Errors" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+
+    // A command used on the wrong type of key
+    con.del("err:list") ! { assert(false) return }
+    con.rpush("err:list", "a") ! { assert(false) return }
+    con.get("err:list") ! {
+        assert(error_is(E.code, server))
+        assert(E.error_code == "WRONGTYPE")
+        assert(E.message.length > 0)
+    }
+    // The connection is still usable after a server error
+    assert((con.llen("err:list") !? 0) == 1)
+    con.del("err:list") ! { assert(false) return }
+
+    // A closed connection reports it instead of crashing
+    con.close()
+    assert(con.closed)
+    con.get("err:list") ! {
+        assert(error_is(E.code, closed))
+        return
+    }
+    assert(false)
+}
+
+test "Cannot connect" {
+    // Nothing listens on this port
+    redis.connect("127.0.0.1", 6300) ! {
+        assert(error_is(E.code, connect))
+        return
+    }
+    assert(false)
+}
+
+test "Wrong password" {
+    // The test server has no password, so sending one is rejected
+    redis.connect("127.0.0.1", TEST_PORT, "not-the-password") ! {
+        assert(error_is(E.code, auth))
+        return
+    }
+    assert(false)
+}
+
+test "Values" {
+    // Conversions between what the server sends and what the program wants
+    let text = redis.Value.of("42")
+    assert(text.to_int() == 42)
+    assert(text.to_uint() == 42)
+    assert(text.to_float() == 42)
+    assert(text.to_string() == "42")
+    assert(!text.is_null())
+
+    let missing = redis.Value.null()
+    assert(missing.is_null())
+    assert(missing.to_string() == "")
+    assert(!isset(missing.to_string_or_null()))
+    assert(missing.to_int() == 0)
+    assert(missing.count == 0)
+
+    let number = redis.Value.of_int(-7)
+    assert(number.to_string() == "-7")
+    assert(number.to_bool())
+    assert(number.to_uint() == 0) // negative numbers clamp
+
+    let list = redis.Value.of_array(.{ redis.Value.of("a"), redis.Value.of("1"), redis.Value.null() })
+    assert(list.is_array())
+    assert(list.count == 3)
+    assert((list.get(0) ! { assert(false) return }).to_string() == "a")
+    assert(list.to_strings().length == 3)
+    assert(!isset(list.to_strings_or_null().get(2) !? "x"))
+    list.get(9) ! { assert(error_is(E.code, missing)) }
+
+    // A field/value reply reads as a map whether it is flat or a RESP3 map
+    let flat = redis.Value.of_array(.{ redis.Value.of("name"), redis.Value.of("valk"), redis.Value.of("n") })
+    let map = flat.to_string_map()
+    assert(map.length == 1) // the unpaired last item is dropped
+    assert((map.get("name") !? "") == "valk")
+
+    let document = redis.Value.of("{\"a\":1}")
+    assert(document.to_json()["a"].int == 1)
+}

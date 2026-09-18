@@ -1,0 +1,142 @@
+/// A message from a channel this connection is subscribed to.
++ class Message {
+    /// `message` for a channel, `pmessage` for one that matched a pattern, and `smessage` for a
+    /// sharded channel.
+    + kind: String
+    /// The channel the message was published to.
+    + channel: String
+    /// The pattern that matched, for a `pmessage`, and "" otherwise.
+    + pattern: String ("")
+    /// What was published.
+    + data: String
+}
+
+extend Connection {
+
+    /// Publishes a message and returns how many subscribers the server handed it to.
+    + fn publish(channel: String, message: String) uint !Error {
+        return (this.run(.{ "PUBLISH", channel, message }) !>).to_uint()
+    }
+
+    /// Subscribes to channels. Read what arrives with `next_message`.
+    ///
+    /// A subscribed connection on RESP2 only accepts subscribe, unsubscribe and ping commands
+    /// until it has unsubscribed from everything, so a program that also runs other commands
+    /// needs a second connection for them. RESP3 has no such restriction.
+    + fn subscribe(channels: Array[String]) !Error {
+        this.subscribe_command("SUBSCRIBE", channels) !>
+    }
+    /// Subscribes to channels matching glob patterns such as `news.*`.
+    + fn psubscribe(patterns: Array[String]) !Error {
+        this.subscribe_command("PSUBSCRIBE", patterns) !>
+    }
+    /// Unsubscribes from channels, or from every channel when none are given.
+    + fn unsubscribe(channels: Array[String] (.{})) !Error {
+        this.subscribe_command("UNSUBSCRIBE", channels) !>
+    }
+    /// Unsubscribes from patterns, or from every pattern when none are given.
+    + fn punsubscribe(patterns: Array[String] (.{})) !Error {
+        this.subscribe_command("PUNSUBSCRIBE", patterns) !>
+    }
+
+    /// Waits for the next message on the channels this connection is subscribed to.
+    ///
+    /// Returns null when `timeout_ms` passes without one; 0 waits forever. Subscription
+    /// confirmations are handled here and never returned, so `subscriptions` is up to date
+    /// after every call.
+    ///
+    /// ```valk
+    /// con.subscribe(.{ "jobs" }) ! panic("%{E.message}")
+    /// while true {
+    ///     let message = con.next_message(1000) ! break
+    ///     if !isset(message) : continue // nothing within a second
+    ///     println(message.channel + ": " + message.data)
+    /// }
+    /// ```
+    + fn next_message(timeout_ms: uint (0)) ?Message !Error {
+        while true {
+            let queued = this.pushes.pop_first() ! {
+                // Nothing waiting: read from the socket, with the caller's timeout on the first
+                // bytes only, so that a message is never left half read
+                if this.data_in.length == this.read_offset {
+                    let arrived = this.wait_for_bytes(timeout_ms) !>
+                    if !arrived : return null
+                }
+                let value = this.read_value(0) !>
+                let message = this.handle_message(value)
+                if isset(message) : return message
+                continue
+            }
+            let message = this.handle_message(queued)
+            if isset(message) : return message
+        }
+    }
+
+    // Waits for the first bytes of a reply. Returns false when the timeout passed.
+    fn wait_for_bytes(timeout_ms: uint) bool !Error {
+        if timeout_ms == 0 {
+            this.fill() !>
+            return true
+        }
+        let read_timeout = this.con.read_timeout_ms
+        let write_timeout = this.con.write_timeout_ms
+        this.con.set_timeouts(timeout_ms, write_timeout)
+        let arrived = true
+        this.fill() ! {
+            this.con.set_timeouts(read_timeout, write_timeout)
+            if error_is(E.code, timeout) : return false
+            throw E
+        }
+        this.con.set_timeouts(read_timeout, write_timeout)
+        return arrived
+    }
+
+    // Turns a push or array reply into a message, or reads it as a subscription confirmation
+    fn handle_message(value: Value) ?Message {
+        if !value.is_array() : return null
+        let kind = (value.get(0) !? Value.null()).to_string()
+        if kind == "message" || kind == "smessage" {
+            return Message {
+                kind: kind
+                channel: (value.get(1) !? Value.null()).to_string()
+                data: (value.get(2) !? Value.null()).to_string()
+            }
+        }
+        if kind == "pmessage" {
+            return Message {
+                kind: kind
+                pattern: (value.get(1) !? Value.null()).to_string()
+                channel: (value.get(2) !? Value.null()).to_string()
+                data: (value.get(3) !? Value.null()).to_string()
+            }
+        }
+        if kind == "subscribe" || kind == "unsubscribe" || kind == "psubscribe" || kind == "punsubscribe" || kind == "ssubscribe" || kind == "sunsubscribe" {
+            this.subscriptions = (value.get(2) !? Value.null()).to_uint()
+        }
+        return null
+    }
+
+    // Sends a subscribe or unsubscribe command and reads its confirmations
+    fn subscribe_command(command: String, channels: Array[String]) !Error {
+        if this.closed : throw .closed { message: "The connection is closed" }
+        let args = Array[String]{ command }
+        args.append_many(channels)
+        this.write_command(args)
+        this.flush() !>
+        // The server confirms every channel separately; an unsubscribe without channels
+        // confirms every subscription this connection had, or once when it had none
+        let expected = channels.length > 0 ? channels.length : (this.subscriptions > 0 ? this.subscriptions : 1)
+        let seen: uint = 0
+        while seen < expected {
+            let value = this.read_value(0) !>
+            if value.type == TYPE.error : throw .server { message: value.string_value, error_code: value.code }
+            let message = this.handle_message(value)
+            if isset(message) {
+                // A message published before the confirmation arrived
+                this.pushes.append(value)
+                continue
+            }
+            seen++
+        }
+    }
+}

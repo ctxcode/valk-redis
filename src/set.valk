@@ -1,0 +1,85 @@
+extend Connection {
+
+    /// Adds a member to a set and returns whether it is new.
+    + fn sadd(key: String, member: String) bool !Error {
+        return (this.run(.{ "SADD", key, member }) !>).to_int() > 0
+    }
+    /// Adds several members to a set and returns how many are new.
+    + fn sadd_many(key: String, members: Array[String]) uint !Error {
+        if members.length == 0 : return 0
+        let args = Array[String]{ "SADD", key }
+        args.append_many(members)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Removes a member from a set and returns whether it was there.
+    + fn srem(key: String, member: String) bool !Error {
+        return (this.run(.{ "SREM", key, member }) !>).to_int() > 0
+    }
+    /// Removes several members from a set and returns how many were there.
+    + fn srem_many(key: String, members: Array[String]) uint !Error {
+        if members.length == 0 : return 0
+        let args = Array[String]{ "SREM", key }
+        args.append_many(members)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Returns whether a set holds a member.
+    + fn sismember(key: String, member: String) bool !Error {
+        return (this.run(.{ "SISMEMBER", key, member }) !>).to_int() > 0
+    }
+    /// Returns every member of a set, in no particular order.
+    + fn smembers(key: String) Array[String] !Error {
+        return (this.run(.{ "SMEMBERS", key }) !>).to_strings()
+    }
+    /// Returns how many members a set has.
+    + fn scard(key: String) uint !Error {
+        return (this.run(.{ "SCARD", key }) !>).to_uint()
+    }
+    /// Takes a random member off a set, or null when it is empty.
+    + fn spop(key: String) ?String !Error {
+        return (this.run(.{ "SPOP", key }) !>).to_string_or_null()
+    }
+    /// Returns a random member without removing it, or null when the set is empty.
+    + fn srandmember(key: String) ?String !Error {
+        return (this.run(.{ "SRANDMEMBER", key }) !>).to_string_or_null()
+    }
+    /// Returns `count` random members without removing them. A negative `count` may return the
+    /// same member several times.
+    + fn srandmembers(key: String, count: int) Array[String] !Error {
+        return (this.run(.{ "SRANDMEMBER", key, count }) !>).to_strings()
+    }
+    /// Moves a member from one set to another and returns whether it was there.
+    + fn smove(key: String, to: String, member: String) bool !Error {
+        return (this.run(.{ "SMOVE", key, to, member }) !>).to_int() > 0
+    }
+    /// Returns the members that every one of `keys` holds.
+    + fn sinter(keys: Array[String]) Array[String] !Error {
+        return (this.set_operation("SINTER", keys) !>).to_strings()
+    }
+    /// Returns the members of all of `keys` together.
+    + fn sunion(keys: Array[String]) Array[String] !Error {
+        return (this.set_operation("SUNION", keys) !>).to_strings()
+    }
+    /// Returns the members of the first key that the other keys do not hold.
+    + fn sdiff(keys: Array[String]) Array[String] !Error {
+        return (this.set_operation("SDIFF", keys) !>).to_strings()
+    }
+    /// Stores the members that every one of `keys` holds in `to` and returns how many there are.
+    + fn sinterstore(to: String, keys: Array[String]) uint !Error {
+        return (this.set_operation("SINTERSTORE", keys, to) !>).to_uint()
+    }
+    /// Stores the members of all of `keys` in `to` and returns how many there are.
+    + fn sunionstore(to: String, keys: Array[String]) uint !Error {
+        return (this.set_operation("SUNIONSTORE", keys, to) !>).to_uint()
+    }
+    /// Stores the difference of `keys` in `to` and returns how many members there are.
+    + fn sdiffstore(to: String, keys: Array[String]) uint !Error {
+        return (this.set_operation("SDIFFSTORE", keys, to) !>).to_uint()
+    }
+
+    fn set_operation(command: String, keys: Array[String], to: String ("")) Value !Error {
+        let args = Array[String]{ command }
+        if to.length > 0 : args.append(to)
+        args.append_many(keys)
+        return this.run(args) !>
+    }
+}

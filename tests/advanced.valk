@@ -1,0 +1,177 @@
+use redis
+
+test "Pipeline" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("pipe:n") ! { assert(false) return }
+
+    let pipe = con.pipeline()
+    pipe.add(.{ "SET", "pipe:n", 1 })
+    pipe.add(.{ "INCR", "pipe:n" })
+    pipe.add(.{ "INCR", "pipe:n" })
+    pipe.add(.{ "GET", "pipe:n" })
+    let replies = pipe.exec() ! { println(E.message) assert(false) return }
+    assert(replies.length == 4)
+    assert((replies.get(1) !? redis.Value.null()).to_int() == 2)
+    assert((replies.get(3) !? redis.Value.null()).to_string() == "3")
+    assert(pipe.count == 0)
+
+    // A failing command does not hide the others
+    pipe.add(.{ "INCR", "pipe:n" })
+    pipe.add(.{ "INCR" }) // too few arguments
+    pipe.add(.{ "GET", "pipe:n" })
+    let mixed = pipe.exec() ! { assert(false) return }
+    assert(mixed.length == 3)
+    assert((mixed.get(1) !? redis.Value.null()).is_error())
+    assert((mixed.get(2) !? redis.Value.null()).to_int() == 4)
+
+    // The connection keeps working afterwards
+    assert((con.get("pipe:n") !? null) == "4")
+    con.del("pipe:n") ! { assert(false) return }
+}
+
+test "Transactions" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del_many(.{ "tx:a", "tx:b" }) ! { assert(false) return }
+
+    con.multi() ! { assert(false) return }
+    con.queue(.{ "SET", "tx:a", "1" }) ! { assert(false) return }
+    con.queue(.{ "INCR", "tx:a" }) ! { assert(false) return }
+    let replies = con.exec() ! { println(E.message) assert(false) return }
+    assert(isset(replies))
+    if isset(replies) {
+        assert(replies.length == 2)
+        assert((replies.get(1) !? redis.Value.null()).to_int() == 2)
+    }
+    assert((con.get("tx:a") !? null) == "2")
+
+    // Discard runs nothing
+    con.multi() ! { assert(false) return }
+    con.queue(.{ "SET", "tx:b", "x" }) ! { assert(false) return }
+    con.discard() ! { assert(false) return }
+    assert(!isset(con.get("tx:b") !? "y"))
+
+    // A watched key that another connection changes cancels the transaction
+    let other = connect() ! { assert(false) return }
+    defer other.close()
+    con.watch(.{ "tx:a" }) ! { assert(false) return }
+    other.set("tx:a", "99") ! { assert(false) return }
+    con.multi() ! { assert(false) return }
+    con.queue(.{ "INCR", "tx:a" }) ! { assert(false) return }
+    let cancelled = con.exec() ! { assert(false) return }
+    assert(!isset(cancelled))
+    assert((con.get("tx:a") !? null) == "99")
+
+    con.del("tx:a") ! { assert(false) return }
+}
+
+test "Scripts" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("script:key") ! { assert(false) return }
+
+    let reply = con.eval("return 1 + 1") ! { println(E.message) assert(false) return }
+    assert(reply.to_int() == 2)
+
+    let echo = con.eval("return {KEYS[1], ARGV[1]}", .{ "script:key" }, .{ "hello" }) ! { assert(false) return }
+    assert(echo.count == 2)
+    assert((echo.get(0) !? redis.Value.null()).to_string() == "script:key")
+    assert((echo.get(1) !? redis.Value.null()).to_string() == "hello")
+
+    // A Script sends its body once and runs by sha afterwards
+    let counter = redis.Script.new("return redis.call('INCR', KEYS[1])")
+    assert(counter.sha.length == 40)
+    assert((counter.run(con, .{ "script:key" }) ! { println(E.message) assert(false) return }).to_int() == 1)
+    assert((counter.run(con, .{ "script:key" }) ! { assert(false) return }).to_int() == 2)
+    assert(con.script_exists(counter.sha) !? false)
+
+    // An unknown sha is reported as NOSCRIPT
+    con.evalsha("0000000000000000000000000000000000000000") ! {
+        assert(error_is(E.code, server))
+        assert(E.error_code == "NOSCRIPT")
+        con.del("script:key") _
+        return
+    }
+    assert(false)
+}
+
+test "Scanning" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+
+    let keys: Array[String] = .{}
+    let i: uint = 0
+    while i++ < 50 : keys.append("scan:key:" + i)
+    let values: Map[String] = .{}
+    each keys as key : values.set(key, "1")
+    con.mset(values) ! { assert(false) return }
+
+    // One page at a time
+    let seen: Array[String] = .{}
+    let iterator = con.scan_iter("scan:key:*", 10)
+    while true {
+        let key = iterator.next() ! { println(E.message) assert(false) return }
+        if !isset(key) : break
+        seen.append(key, true)
+    }
+    assert(seen.length == 50)
+
+    // The low level form gives the cursor back
+    let cursor, page = con.scan(0, "scan:key:*", 10) ! { assert(false) return }
+    assert(cursor != 0 || page.length == 50)
+
+    // Sets, hashes and sorted sets scan the same way
+    con.del_many(.{ "scan:set", "scan:hash", "scan:zset" }) ! { assert(false) return }
+    con.sadd_many("scan:set", .{ "a", "b", "c" }) ! { assert(false) return }
+    assert((con.sscan_iter("scan:set").all() !? .{}).length == 3)
+    con.hset_many("scan:hash", .{ "f1" => "v1", "f2" => "v2" }) ! { assert(false) return }
+    let _, fields = con.hscan("scan:hash") ! { assert(false) return }
+    assert(fields.length == 2)
+    assert((fields.get("f2") !? "") == "v2")
+    con.zadd("scan:zset", 1.5, "m") ! { assert(false) return }
+    let _, members = con.zscan("scan:zset") ! { assert(false) return }
+    assert(members.length == 1)
+    assert((members.get(0) ! { assert(false) return }).score == 1.5)
+
+    con.del_many(keys) ! { assert(false) return }
+    con.del_many(.{ "scan:set", "scan:hash", "scan:zset" }) ! { assert(false) return }
+}
+
+test "Large values" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+
+    // A value far larger than one socket read, to exercise the read buffer
+    let block = String.random(1024)
+    let big = ByteBuffer.new(1024 * 1024)
+    let i: uint = 0
+    while i++ < 2048 : big.write(block)
+    let value = big.to_string()
+    assert(value.length == 2 * 1024 * 1024)
+
+    con.set("large:value", value) ! { println(E.message) assert(false) return }
+    assert((con.strlen("large:value") !? 0) == value.length)
+    let back = con.get("large:value") ! { println(E.message) assert(false) return }
+    assert(isset(back))
+    if isset(back) : assert(back == value)
+
+    // Many replies in one go, larger than the read chunk together
+    con.del("large:list") ! { assert(false) return }
+    let items: Array[String] = .{}
+    let n: uint = 0
+    while n++ < 5000 : items.append("item-" + n + "-" + block.range(0, 20))
+    con.rpush_many("large:list", items) ! { assert(false) return }
+    let all = con.lrange("large:list") ! { assert(false) return }
+    assert(all.length == 5000)
+    assert((all.get(4999) !? "") == (items.get(4999) !? "x"))
+
+    let pipe = con.pipeline()
+    let p: uint = 0
+    while p++ < 1000 : pipe.add(.{ "GET", "large:value" })
+    let replies = pipe.exec() ! { assert(false) return }
+    assert(replies.length == 1000)
+    assert((replies.get(999) !? redis.Value.null()).to_string().length == value.length)
+
+    con.del_many(.{ "large:value", "large:list" }) ! { assert(false) return }
+}

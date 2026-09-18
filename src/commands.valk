@@ -1,0 +1,219 @@
+extend Connection {
+
+    //
+    // Keys
+    //
+
+    /// Removes a key and returns whether it existed.
+    + fn del(key: String) bool !Error {
+        return (this.run(.{ "DEL", key }) !>).to_int() > 0
+    }
+    /// Removes several keys and returns how many existed.
+    + fn del_many(keys: Array[String]) uint !Error {
+        if keys.length == 0 : return 0
+        let args = Array[String]{ "DEL" }
+        args.append_many(keys)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Returns whether a key exists.
+    + fn exists(key: String) bool !Error {
+        return (this.run(.{ "EXISTS", key }) !>).to_int() > 0
+    }
+    /// Returns how many of `keys` exist. A key present several times counts each time.
+    + fn exists_many(keys: Array[String]) uint !Error {
+        if keys.length == 0 : return 0
+        let args = Array[String]{ "EXISTS" }
+        args.append_many(keys)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Gives a key a lifetime in seconds and returns whether it was set.
+    + fn expire(key: String, seconds: uint) bool !Error {
+        return (this.run(.{ "EXPIRE", key, seconds }) !>).to_int() > 0
+    }
+    /// Gives a key a lifetime in milliseconds and returns whether it was set.
+    + fn pexpire(key: String, milliseconds: uint) bool !Error {
+        return (this.run(.{ "PEXPIRE", key, milliseconds }) !>).to_int() > 0
+    }
+    /// Makes a key expire at a Unix time in seconds.
+    + fn expire_at(key: String, unix_seconds: uint) bool !Error {
+        return (this.run(.{ "EXPIREAT", key, unix_seconds }) !>).to_int() > 0
+    }
+    /// Returns the seconds a key still has to live, -1 when it has no lifetime and -2 when it
+    /// does not exist.
+    + fn ttl(key: String) int !Error {
+        return (this.run(.{ "TTL", key }) !>).to_int()
+    }
+    /// Returns the milliseconds a key still has to live, -1 when it has no lifetime and -2 when
+    /// it does not exist.
+    + fn pttl(key: String) int !Error {
+        return (this.run(.{ "PTTL", key }) !>).to_int()
+    }
+    /// Removes the lifetime of a key, so that it stays until it is deleted.
+    + fn persist(key: String) bool !Error {
+        return (this.run(.{ "PERSIST", key }) !>).to_int() > 0
+    }
+    /// Renames a key. Throws `server` when the key does not exist.
+    + fn rename(key: String, to: String) !Error {
+        this.run(.{ "RENAME", key, to }) !>
+    }
+    /// Renames a key when the new name is free, and returns whether it was renamed.
+    + fn rename_nx(key: String, to: String) bool !Error {
+        return (this.run(.{ "RENAMENX", key, to }) !>).to_int() > 0
+    }
+    /// Returns the type of a key: `string`, `list`, `set`, `zset`, `hash`, `stream`, or `none`
+    /// when it does not exist.
+    + fn type_of(key: String) String !Error {
+        return (this.run(.{ "TYPE", key }) !>).to_string()
+    }
+    /// Returns every key matching a glob pattern such as `user:*`.
+    ///
+    /// This walks the whole keyspace and blocks the server while it does; use `scan_iter` on a
+    /// database that is in use.
+    + fn keys(pattern: String ("*")) Array[String] !Error {
+        return (this.run(.{ "KEYS", pattern }) !>).to_strings()
+    }
+    /// Returns a random key, or null when the database is empty.
+    + fn random_key() ?String !Error {
+        return (this.run(.{ "RANDOMKEY" }) !>).to_string_or_null()
+    }
+    /// Returns how many keys the selected database holds.
+    + fn dbsize() uint !Error {
+        return (this.run(.{ "DBSIZE" }) !>).to_uint()
+    }
+
+    //
+    // Strings
+    //
+
+    /// Returns the value of a key, or null when it does not exist.
+    + fn get(key: String) ?String !Error {
+        return (this.run(.{ "GET", key }) !>).to_string_or_null()
+    }
+    /// Sets the value of a key and returns whether it was written.
+    ///
+    /// `expire_seconds` or `expire_ms` give the key a lifetime, `if_not_exists` only writes a
+    /// new key and `if_exists` only an existing one, so that either can return false.
+    /// `keep_ttl` keeps the lifetime the key already had.
+    + fn set(key: String, value: String, expire_seconds: uint (0), expire_ms: uint (0), if_not_exists: bool (false), if_exists: bool (false), keep_ttl: bool (false)) bool !Error {
+        let args = Array[String]{ "SET", key, value }
+        if expire_seconds > 0 {
+            args.append("EX")
+            args.append(expire_seconds)
+        } else if expire_ms > 0 {
+            args.append("PX")
+            args.append(expire_ms)
+        } else if keep_ttl : args.append("KEEPTTL")
+        if if_not_exists : args.append("NX")
+        else if if_exists : args.append("XX")
+        let reply = this.run(args) !>
+        return !reply.is_null()
+    }
+    /// Sets a key with a lifetime in seconds.
+    + fn setex(key: String, value: String, seconds: uint) !Error {
+        this.run(.{ "SETEX", key, seconds, value }) !>
+    }
+    /// Sets a key only when it does not exist yet, and returns whether it was written.
+    + fn setnx(key: String, value: String) bool !Error {
+        return (this.run(.{ "SETNX", key, value }) !>).to_int() > 0
+    }
+    /// Sets a key and returns what it held before.
+    + fn getset(key: String, value: String) ?String !Error {
+        return (this.run(.{ "GETSET", key, value }) !>).to_string_or_null()
+    }
+    /// Returns a key and deletes it. Needs Redis 6.2 or newer.
+    + fn getdel(key: String) ?String !Error {
+        return (this.run(.{ "GETDEL", key }) !>).to_string_or_null()
+    }
+    /// Returns the values of several keys at once; a key that does not exist becomes null.
+    + fn mget(keys: Array[String]) Array[?String] !Error {
+        if keys.length == 0 : return .{}
+        let args = Array[String]{ "MGET" }
+        args.append_many(keys)
+        return (this.run(args) !>).to_strings_or_null()
+    }
+    /// Sets several keys at once.
+    + fn mset(values: Map[String]) !Error {
+        if values.length == 0 : return
+        let args = Array[String]{ "MSET" }
+        each values as value, key {
+            args.append(key)
+            args.append(value)
+        }
+        this.run(args) !>
+    }
+    /// Appends to a key and returns the new length.
+    + fn append(key: String, value: String) uint !Error {
+        return (this.run(.{ "APPEND", key, value }) !>).to_uint()
+    }
+    /// Returns the length of the value of a key, or 0 when it does not exist.
+    + fn strlen(key: String) uint !Error {
+        return (this.run(.{ "STRLEN", key }) !>).to_uint()
+    }
+    /// Adds 1 to a number held at a key and returns the result. A missing key counts as 0.
+    + fn incr(key: String) int !Error {
+        return (this.run(.{ "INCR", key }) !>).to_int()
+    }
+    /// Adds `amount` to a number held at a key and returns the result.
+    + fn incr_by(key: String, amount: int) int !Error {
+        return (this.run(.{ "INCRBY", key, amount }) !>).to_int()
+    }
+    /// Adds a floating point `amount` to a number held at a key and returns the result.
+    + fn incr_by_float(key: String, amount: float) float !Error {
+        return (this.run(.{ "INCRBYFLOAT", key, amount.to_shortest_string() }) !>).to_float()
+    }
+    /// Takes 1 off a number held at a key and returns the result.
+    + fn decr(key: String) int !Error {
+        return (this.run(.{ "DECR", key }) !>).to_int()
+    }
+    /// Takes `amount` off a number held at a key and returns the result.
+    + fn decr_by(key: String, amount: int) int !Error {
+        return (this.run(.{ "DECRBY", key, amount }) !>).to_int()
+    }
+
+    //
+    // Server
+    //
+
+    /// Returns the `INFO` fields of a section, or of the default sections when none is given.
+    ///
+    /// The comment lines that separate the sections are left out.
+    + fn info(section: String ("")) Map[String] !Error {
+        let args = Array[String]{ "INFO" }
+        if section.length > 0 : args.append(section)
+        let text = (this.run(args) !>).to_string()
+        let out: Map[String] = .{}
+        each text.split("\n") as line {
+            line = line.trim("\r")
+            if line.length == 0 || line[0] == '#' : continue
+            let colon = line.index_of_byte(':') ! continue
+            out.set(line.range(0, colon), line.range(colon + 1, line.length - colon - 1))
+        }
+        return out
+    }
+    /// Returns the server version, such as `7.2.4`.
+    + fn server_version() String !Error {
+        let info = this.info("server") !>
+        return info.get("redis_version") !? (info.get("valkey_version") !? "")
+    }
+    /// Returns the configuration settings matching a glob pattern.
+    + fn config_get(pattern: String) Map[String] !Error {
+        return (this.run(.{ "CONFIG", "GET", pattern }) !>).to_string_map()
+    }
+    /// Changes one configuration setting.
+    + fn config_set(name: String, value: String) !Error {
+        this.run(.{ "CONFIG", "SET", name, value }) !>
+    }
+    /// Removes every key of the selected database.
+    + fn flushdb() !Error {
+        this.run(.{ "FLUSHDB" }) !>
+    }
+    /// Removes every key of every database.
+    + fn flushall() !Error {
+        this.run(.{ "FLUSHALL" }) !>
+    }
+    /// Returns the Unix time of the server in seconds.
+    + fn time() uint !Error {
+        let reply = this.run(.{ "TIME" }) !>
+        return (reply.get(0) !? Value.null()).to_uint()
+    }
+}

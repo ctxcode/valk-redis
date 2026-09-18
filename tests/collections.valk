@@ -1,0 +1,154 @@
+
+test "Hashes" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("hash:user") ! { assert(false) return }
+
+    assert(con.hset("hash:user", "name", "valk") !? false)
+    assert(!(con.hset("hash:user", "name", "valk2") !? true)) // not a new field
+    assert((con.hset_many("hash:user", .{ "city" => "Amsterdam", "age" => "3" }) !? 0) == 2)
+    assert((con.hget("hash:user", "name") !? null) == "valk2")
+    assert(!isset(con.hget("hash:user", "nothing") !? "x"))
+    assert(con.hexists("hash:user", "city") !? false)
+    assert((con.hlen("hash:user") !? 0) == 3)
+    assert((con.hincr_by("hash:user", "age", 2) !? 0) == 5)
+    assert((con.hincr_by_float("hash:user", "age", 0.5) !? 0) == 5.5)
+
+    let all = con.hgetall("hash:user") ! { assert(false) return }
+    assert(all.length == 3)
+    assert((all.get("city") !? "") == "Amsterdam")
+
+    let some = con.hmget("hash:user", .{ "name", "nothing" }) ! { assert(false) return }
+    assert((some.get(0) !? null) == "valk2")
+    assert(!isset(some.get(1) !? "x"))
+
+    assert((con.hkeys("hash:user") !? .{}).length == 3)
+    assert((con.hvals("hash:user") !? .{}).length == 3)
+    assert(con.hdel("hash:user", "city") !? false)
+    assert((con.hlen("hash:user") !? 0) == 2)
+    assert(!isset(con.hgetall("hash:nothing") ! { assert(false) return }.get("x") !? null))
+
+    con.del("hash:user") ! { assert(false) return }
+}
+
+test "Lists" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("list:queue") ! { assert(false) return }
+
+    assert((con.rpush("list:queue", "b") !? 0) == 1)
+    assert((con.rpush_many("list:queue", .{ "c", "d" }) !? 0) == 3)
+    assert((con.lpush("list:queue", "a") !? 0) == 4)
+    assert((con.llen("list:queue") !? 0) == 4)
+
+    let all = con.lrange("list:queue") ! { assert(false) return }
+    assert(all.length == 4)
+    assert((all.get(0) !? "") == "a")
+    assert((all.get(3) !? "") == "d")
+    assert((con.lrange("list:queue", 1, 2) !? .{}).length == 2)
+
+    assert((con.lindex("list:queue", 1) !? null) == "b")
+    assert(!isset(con.lindex("list:queue", 40) !? "x"))
+    con.lset("list:queue", 1, "B") ! { assert(false) return }
+    assert((con.lindex("list:queue", 1) !? null) == "B")
+
+    assert((con.lpop("list:queue") !? null) == "a")
+    assert((con.rpop("list:queue") !? null) == "d")
+    assert((con.lrem("list:queue", "B") !? 0) == 1)
+    con.ltrim("list:queue", 0, 0) ! { assert(false) return }
+    assert((con.llen("list:queue") !? 0) == 1)
+
+    // An empty list pops null instead of blocking
+    con.del("list:queue") ! { assert(false) return }
+    assert(!isset(con.lpop("list:queue") !? "x"))
+}
+
+test "Blocking pop" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("list:block") ! { assert(false) return }
+
+    // Nothing arrives within the timeout
+    assert(!isset(con.blpop("list:block", 1) !? "x"))
+
+    // A value that is already there comes back at once
+    con.rpush("list:block", "job") ! { assert(false) return }
+    assert((con.blpop("list:block", 1) !? null) == "job")
+
+    con.rpush("list:block", "job2") ! { assert(false) return }
+    let pair = con.brpop_many(.{ "list:block" }, 1) ! { assert(false) return }
+    assert(isset(pair))
+    if isset(pair) {
+        assert((pair.get(0) !? "") == "list:block")
+        assert((pair.get(1) !? "") == "job2")
+    }
+}
+
+test "Sets" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del_many(.{ "set:a", "set:b", "set:out" }) ! { assert(false) return }
+
+    assert(con.sadd("set:a", "x") !? false)
+    assert(!(con.sadd("set:a", "x") !? true))
+    assert((con.sadd_many("set:a", .{ "y", "z" }) !? 0) == 2)
+    assert((con.scard("set:a") !? 0) == 3)
+    assert(con.sismember("set:a", "y") !? false)
+    assert(!(con.sismember("set:a", "nothing") !? true))
+    assert((con.smembers("set:a") !? .{}).length == 3)
+
+    con.sadd_many("set:b", .{ "y", "z", "w" }) ! { assert(false) return }
+    assert((con.sinter(.{ "set:a", "set:b" }) !? .{}).length == 2)
+    assert((con.sunion(.{ "set:a", "set:b" }) !? .{}).length == 4)
+    assert((con.sdiff(.{ "set:a", "set:b" }) !? .{}).length == 1)
+    assert((con.sinterstore("set:out", .{ "set:a", "set:b" }) !? 0) == 2)
+    assert((con.scard("set:out") !? 0) == 2)
+
+    assert(con.srem("set:a", "x") !? false)
+    assert(isset(con.spop("set:a") !? null))
+    assert(isset(con.srandmember("set:b") !? null))
+    con.del_many(.{ "set:a", "set:b", "set:out" }) ! { assert(false) return }
+}
+
+test "Sorted sets" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("zset:board") ! { assert(false) return }
+
+    assert(con.zadd("zset:board", 10, "ada") !? false)
+    assert((con.zadd_many("zset:board", .{ "bob" => 5, "cid" => 20 }) !? 0) == 2)
+    assert((con.zcard("zset:board") !? 0) == 3)
+    assert((con.zscore("zset:board", "ada") !? 0) == 10)
+    assert(!isset(con.zscore("zset:board", "nothing") !? 0))
+    assert((con.zincr_by("zset:board", 2.5, "ada") !? 0) == 12.5)
+    assert((con.zrank("zset:board", "bob") !? 9) == 0)
+    assert((con.zrevrank("zset:board", "cid") !? 9) == 0)
+
+    let ordered = con.zrange("zset:board") ! { assert(false) return }
+    assert(ordered.length == 3)
+    assert((ordered.get(0) !? "") == "bob")
+    assert((ordered.get(2) !? "") == "cid")
+    let reversed = con.zrange("zset:board", 0, -1, true) ! { assert(false) return }
+    assert((reversed.get(0) !? "") == "cid")
+
+    let scored = con.zrange_with_scores("zset:board") ! { assert(false) return }
+    assert(scored.length == 3)
+    let first = scored.get(0) ! { assert(false) return }
+    assert(first.member == "bob")
+    assert(first.score == 5)
+
+    assert((con.zcount("zset:board", "10", "+inf") !? 0) == 2)
+    assert((con.zrange_by_score("zset:board", "(5", "+inf") !? .{}).length == 2)
+    assert((con.zrange_by_score("zset:board", "-inf", "+inf", 0, 1) !? .{}).length == 1)
+    assert((con.zrange_by_score_with_scores("zset:board", "-inf", "6") !? .{}).length == 1)
+
+    let lowest = con.zpopmin("zset:board") ! { assert(false) return }
+    assert(isset(lowest))
+    if isset(lowest) : assert(lowest.member == "bob")
+    let highest = con.zpopmax("zset:board") ! { assert(false) return }
+    if isset(highest) : assert(highest.member == "cid")
+
+    assert(con.zrem("zset:board", "ada") !? false)
+    assert((con.zcard("zset:board") !? 1) == 0)
+    assert(!isset(con.zpopmin("zset:board") !? null))
+}

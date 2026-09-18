@@ -1,0 +1,71 @@
+extend Connection {
+
+    /// Returns one field of a hash, or null when the field or the key does not exist.
+    + fn hget(key: String, field: String) ?String !Error {
+        return (this.run(.{ "HGET", key, field }) !>).to_string_or_null()
+    }
+    /// Sets one field of a hash and returns whether the field is new.
+    + fn hset(key: String, field: String, value: String) bool !Error {
+        return (this.run(.{ "HSET", key, field, value }) !>).to_int() > 0
+    }
+    /// Sets several fields of a hash and returns how many of them are new.
+    + fn hset_many(key: String, values: Map[String]) uint !Error {
+        if values.length == 0 : return 0
+        let args = Array[String]{ "HSET", key }
+        each values as value, field {
+            args.append(field)
+            args.append(value)
+        }
+        return (this.run(args) !>).to_uint()
+    }
+    /// Sets one field of a hash only when it does not exist yet.
+    + fn hsetnx(key: String, field: String, value: String) bool !Error {
+        return (this.run(.{ "HSETNX", key, field, value }) !>).to_int() > 0
+    }
+    /// Removes one field of a hash and returns whether it existed.
+    + fn hdel(key: String, field: String) bool !Error {
+        return (this.run(.{ "HDEL", key, field }) !>).to_int() > 0
+    }
+    /// Removes several fields of a hash and returns how many existed.
+    + fn hdel_many(key: String, fields: Array[String]) uint !Error {
+        if fields.length == 0 : return 0
+        let args = Array[String]{ "HDEL", key }
+        args.append_many(fields)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Returns whether a hash has a field.
+    + fn hexists(key: String, field: String) bool !Error {
+        return (this.run(.{ "HEXISTS", key, field }) !>).to_int() > 0
+    }
+    /// Returns every field of a hash with its value, or an empty map when the key does not exist.
+    + fn hgetall(key: String) Map[String] !Error {
+        return (this.run(.{ "HGETALL", key }) !>).to_string_map()
+    }
+    /// Returns the values of several fields; a field that does not exist becomes null.
+    + fn hmget(key: String, fields: Array[String]) Array[?String] !Error {
+        if fields.length == 0 : return .{}
+        let args = Array[String]{ "HMGET", key }
+        args.append_many(fields)
+        return (this.run(args) !>).to_strings_or_null()
+    }
+    /// Returns the field names of a hash.
+    + fn hkeys(key: String) Array[String] !Error {
+        return (this.run(.{ "HKEYS", key }) !>).to_strings()
+    }
+    /// Returns the values of a hash.
+    + fn hvals(key: String) Array[String] !Error {
+        return (this.run(.{ "HVALS", key }) !>).to_strings()
+    }
+    /// Returns how many fields a hash has.
+    + fn hlen(key: String) uint !Error {
+        return (this.run(.{ "HLEN", key }) !>).to_uint()
+    }
+    /// Adds `amount` to a number held in a field and returns the result.
+    + fn hincr_by(key: String, field: String, amount: int) int !Error {
+        return (this.run(.{ "HINCRBY", key, field, amount }) !>).to_int()
+    }
+    /// Adds a floating point `amount` to a number held in a field and returns the result.
+    + fn hincr_by_float(key: String, field: String, amount: float) float !Error {
+        return (this.run(.{ "HINCRBYFLOAT", key, field, amount.to_shortest_string() }) !>).to_float()
+    }
+}

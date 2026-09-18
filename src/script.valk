@@ -1,0 +1,77 @@
+use valk.crypto
+
+extend Connection {
+
+    /// Runs a Lua script on the server and returns its reply.
+    ///
+    /// The keys the script touches belong in `keys`, where the script reads them as `KEYS[1]`
+    /// and further; everything else goes in `args`, which the script reads as `ARGV[1]`. Use a
+    /// `Script` to send the body only once.
+    + fn eval(source: String, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
+        return this.eval_command("EVAL", source, keys, args) !>
+    }
+
+    /// Runs a script the server already has, by its SHA-1. Throws `server` with the code
+    /// `NOSCRIPT` when it does not have it.
+    + fn evalsha(sha: String, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
+        return this.eval_command("EVALSHA", sha, keys, args) !>
+    }
+
+    /// Stores a script on the server and returns its SHA-1.
+    + fn script_load(source: String) String !Error {
+        return (this.run(.{ "SCRIPT", "LOAD", source }) !>).to_string()
+    }
+
+    /// Returns whether the server has a script with this SHA-1.
+    + fn script_exists(sha: String) bool !Error {
+        let reply = this.run(.{ "SCRIPT", "EXISTS", sha }) !>
+        return (reply.get(0) !? Value.null()).to_int() > 0
+    }
+
+    fn eval_command(command: String, script: String, keys: Array[String], args: Array[String]) Value !Error {
+        let all = Array[String]{ command, script, keys.length }
+        all.append_many(keys)
+        all.append_many(args)
+        return this.run(all) !>
+    }
+}
+
+/// A Lua script that is sent to the server once and then run by its SHA-1.
+///
+/// `run` tries `EVALSHA` first and falls back to `EVAL` when the server does not know the
+/// script yet, or forgot it after a restart or a `SCRIPT FLUSH`.
+///
+/// ```valk
+/// global take_token: redis.Script (redis.Script.new("
+///     local left = tonumber(redis.call('GET', KEYS[1]) or ARGV[1])
+///     if left <= 0 then return 0 end
+///     redis.call('DECR', KEYS[1])
+///     return left
+/// "))
+///
+/// let left = take_token.run(con, .{ "tokens" }, .{ "10" }) ! panic("%{E.message}")
+/// ```
++ class Script {
+    /// The Lua source.
+    + source: String
+    /// The SHA-1 of the source, which is the name the server knows it by.
+    ~ sha: String ("")
+
+    /// Creates a script. Nothing is sent to a server until it runs.
+    + static fn new(source: String) Script {
+        return Script {
+            source: source
+            sha: crypto.sha1_hex(source)
+        }
+    }
+
+    /// Runs the script and returns its reply.
+    + fn run(con: Connection, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
+        return con.evalsha(this.sha, keys, args) ! {
+            if error_is(E.code, server) && E.error_code == "NOSCRIPT" {
+                return con.eval(this.source, keys, args) !>
+            }
+            throw E
+        }
+    }
+}

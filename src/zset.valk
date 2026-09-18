@@ -1,0 +1,145 @@
+/// One member of a sorted set with its score.
++ class ScoredMember {
+    /// The member.
+    + member: String
+    /// Its score.
+    + score: float
+}
+
+extend Connection {
+
+    /// Adds a member to a sorted set, or changes its score, and returns whether it is new.
+    + fn zadd(key: String, score: float, member: String) bool !Error {
+        return (this.run(.{ "ZADD", key, score.to_shortest_string(), member }) !>).to_int() > 0
+    }
+    /// Adds several members with their scores and returns how many are new.
+    + fn zadd_many(key: String, members: Map[float]) uint !Error {
+        if members.length == 0 : return 0
+        let args = Array[String]{ "ZADD", key }
+        each members as score, member {
+            args.append(score.to_shortest_string())
+            args.append(member)
+        }
+        return (this.run(args) !>).to_uint()
+    }
+    /// Removes a member and returns whether it was there.
+    + fn zrem(key: String, member: String) bool !Error {
+        return (this.run(.{ "ZREM", key, member }) !>).to_int() > 0
+    }
+    /// Removes several members and returns how many were there.
+    + fn zrem_many(key: String, members: Array[String]) uint !Error {
+        if members.length == 0 : return 0
+        let args = Array[String]{ "ZREM", key }
+        args.append_many(members)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Returns the score of a member, or null when it is not in the set.
+    + fn zscore(key: String, member: String) ?float !Error {
+        let reply = this.run(.{ "ZSCORE", key, member }) !>
+        if reply.is_null() : return null
+        return reply.to_float()
+    }
+    /// Adds `amount` to the score of a member and returns its new score.
+    + fn zincr_by(key: String, amount: float, member: String) float !Error {
+        return (this.run(.{ "ZINCRBY", key, amount.to_shortest_string(), member }) !>).to_float()
+    }
+    /// Returns how many members a sorted set has.
+    + fn zcard(key: String) uint !Error {
+        return (this.run(.{ "ZCARD", key }) !>).to_uint()
+    }
+    /// Returns how many members have a score between `min` and `max`.
+    ///
+    /// The bounds are written as Redis writes them: a number, `-inf`, `+inf`, or a number with a
+    /// `(` in front of it for a bound that is not included.
+    + fn zcount(key: String, min: String ("-inf"), max: String ("+inf")) uint !Error {
+        return (this.run(.{ "ZCOUNT", key, min, max }) !>).to_uint()
+    }
+    /// Returns the position of a member, counted from the lowest score, or null when it is not
+    /// in the set.
+    + fn zrank(key: String, member: String) ?uint !Error {
+        let reply = this.run(.{ "ZRANK", key, member }) !>
+        if reply.is_null() : return null
+        return reply.to_uint()
+    }
+    /// Returns the position of a member, counted from the highest score.
+    + fn zrevrank(key: String, member: String) ?uint !Error {
+        let reply = this.run(.{ "ZREVRANK", key, member }) !>
+        if reply.is_null() : return null
+        return reply.to_uint()
+    }
+    /// Returns the members between two positions, lowest score first.
+    ///
+    /// Negative positions count from the end, so `zrange(key, 0, -1)` is every member.
+    + fn zrange(key: String, start: int (0), stop: int (-1), reverse: bool (false)) Array[String] !Error {
+        let args = Array[String]{ "ZRANGE", key, start, stop }
+        if reverse : args.append("REV")
+        return (this.run(args) !>).to_strings()
+    }
+    /// The same as `zrange`, with the score of every member.
+    + fn zrange_with_scores(key: String, start: int (0), stop: int (-1), reverse: bool (false)) Array[ScoredMember] !Error {
+        let args = Array[String]{ "ZRANGE", key, start, stop }
+        if reverse : args.append("REV")
+        args.append("WITHSCORES")
+        return scored_members(this.run(args) !>)
+    }
+    /// Returns the members with a score between `min` and `max`, lowest score first.
+    ///
+    /// The bounds are written as in `zcount`. `count` above 0 returns at most that many members,
+    /// starting at `offset`.
+    + fn zrange_by_score(key: String, min: String ("-inf"), max: String ("+inf"), offset: uint (0), count: uint (0)) Array[String] !Error {
+        let args = Array[String]{ "ZRANGEBYSCORE", key, min, max }
+        if count > 0 {
+            args.append("LIMIT")
+            args.append(offset)
+            args.append(count)
+        }
+        return (this.run(args) !>).to_strings()
+    }
+    /// The same as `zrange_by_score`, with the score of every member.
+    + fn zrange_by_score_with_scores(key: String, min: String ("-inf"), max: String ("+inf"), offset: uint (0), count: uint (0)) Array[ScoredMember] !Error {
+        let args = Array[String]{ "ZRANGEBYSCORE", key, min, max, "WITHSCORES" }
+        if count > 0 {
+            args.append("LIMIT")
+            args.append(offset)
+            args.append(count)
+        }
+        return scored_members(this.run(args) !>)
+    }
+    /// Removes the members with a score between `min` and `max` and returns how many were
+    /// removed.
+    + fn zrem_by_score(key: String, min: String ("-inf"), max: String ("+inf")) uint !Error {
+        return (this.run(.{ "ZREMRANGEBYSCORE", key, min, max }) !>).to_uint()
+    }
+    /// Removes the members between two positions and returns how many were removed.
+    + fn zrem_by_rank(key: String, start: int, stop: int) uint !Error {
+        return (this.run(.{ "ZREMRANGEBYRANK", key, start, stop }) !>).to_uint()
+    }
+    /// Takes the member with the lowest score off the set, or null when it is empty.
+    + fn zpopmin(key: String) ?ScoredMember !Error {
+        return first_scored_member(this.run(.{ "ZPOPMIN", key }) !>)
+    }
+    /// Takes the member with the highest score off the set, or null when it is empty.
+    + fn zpopmax(key: String) ?ScoredMember !Error {
+        return first_scored_member(this.run(.{ "ZPOPMAX", key }) !>)
+    }
+}
+
+// Reads a member,score,member,score reply
+fn scored_members(reply: Value) Array[ScoredMember] {
+    let items = reply.items
+    let out: Array[ScoredMember] = .{}
+    if !isset(items) : return out
+    let i: uint = 0
+    while i + 1 < items.length {
+        let member = items.get(i) !? Value.null()
+        let score = items.get(i + 1) !? Value.null()
+        out.append(ScoredMember { member: member.to_string(), score: score.to_float() })
+        i += 2
+    }
+    return out
+}
+
+fn first_scored_member(reply: Value) ?ScoredMember {
+    let members = scored_members(reply)
+    return members.get(0) !? null
+}

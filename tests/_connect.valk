@@ -1,0 +1,10 @@
+use redis
+
+// The server started by tests/server.sh. Database 9 is used so that a Redis that happens to
+// hold real data in database 0 is left alone.
+value TEST_PORT (6399)
+value TEST_DB (9)
+
+fn connect(protocol: uint (2)) redis.Connection !redis.Error {
+    return redis.connect("127.0.0.1", TEST_PORT, "", TEST_DB, "", 5000, protocol) !>
+}

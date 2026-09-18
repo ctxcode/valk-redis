@@ -1,0 +1,45 @@
+extend Connection {
+
+    /// Starts a transaction. Commands added with `queue` are kept by the server until `exec`.
+    + fn multi() !Error {
+        this.run(.{ "MULTI" }) !>
+    }
+
+    /// Adds a command to the open transaction.
+    ///
+    /// The server answers `QUEUED` and runs nothing yet. A command it refuses outright, such as
+    /// one with the wrong number of arguments, throws here and makes the whole `exec` fail.
+    + fn queue(args: Array[String]) !Error {
+        this.run(args) !>
+    }
+
+    /// Runs the queued commands and returns their replies in order.
+    ///
+    /// Returns null when a key watched with `watch` changed, which is how a transaction that
+    /// has to be retried is told apart from one that ran. A command that failed is an `error`
+    /// value in the result; the commands around it still ran, as Redis has no rollback.
+    + fn exec() ?Array[Value] !Error {
+        let reply = this.run(.{ "EXEC" }) !>
+        if reply.is_null() : return null
+        return reply.to_array()
+    }
+
+    /// Throws away the queued commands.
+    + fn discard() !Error {
+        this.run(.{ "DISCARD" }) !>
+    }
+
+    /// Watches keys for the next transaction: when any of them changes before `exec`, the
+    /// transaction does not run and `exec` returns null.
+    + fn watch(keys: Array[String]) !Error {
+        if keys.length == 0 : return
+        let args = Array[String]{ "WATCH" }
+        args.append_many(keys)
+        this.run(args) !>
+    }
+
+    /// Stops watching every watched key.
+    + fn unwatch() !Error {
+        this.run(.{ "UNWATCH" }) !>
+    }
+}

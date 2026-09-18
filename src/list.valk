@@ -1,0 +1,101 @@
+extend Connection {
+
+    /// Adds a value at the head of a list and returns its new length.
+    + fn lpush(key: String, value: String) uint !Error {
+        return (this.run(.{ "LPUSH", key, value }) !>).to_uint()
+    }
+    /// Adds several values at the head of a list, the last one ending up first.
+    + fn lpush_many(key: String, values: Array[String]) uint !Error {
+        if values.length == 0 : return 0
+        let args = Array[String]{ "LPUSH", key }
+        args.append_many(values)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Adds a value at the tail of a list and returns its new length.
+    + fn rpush(key: String, value: String) uint !Error {
+        return (this.run(.{ "RPUSH", key, value }) !>).to_uint()
+    }
+    /// Adds several values at the tail of a list, in order.
+    + fn rpush_many(key: String, values: Array[String]) uint !Error {
+        if values.length == 0 : return 0
+        let args = Array[String]{ "RPUSH", key }
+        args.append_many(values)
+        return (this.run(args) !>).to_uint()
+    }
+    /// Takes the first value off a list, or null when it is empty.
+    + fn lpop(key: String) ?String !Error {
+        return (this.run(.{ "LPOP", key }) !>).to_string_or_null()
+    }
+    /// Takes the last value off a list, or null when it is empty.
+    + fn rpop(key: String) ?String !Error {
+        return (this.run(.{ "RPOP", key }) !>).to_string_or_null()
+    }
+    /// Returns the values of a list between two offsets. Negative offsets count from the end, so
+    /// `lrange(key, 0, -1)` is the whole list.
+    + fn lrange(key: String, start: int (0), stop: int (-1)) Array[String] !Error {
+        return (this.run(.{ "LRANGE", key, start, stop }) !>).to_strings()
+    }
+    /// Returns how many values a list holds.
+    + fn llen(key: String) uint !Error {
+        return (this.run(.{ "LLEN", key }) !>).to_uint()
+    }
+    /// Returns the value at an offset of a list, or null when the offset lies outside it.
+    + fn lindex(key: String, index: int) ?String !Error {
+        return (this.run(.{ "LINDEX", key, index }) !>).to_string_or_null()
+    }
+    /// Writes the value at an offset of a list. Throws `server` when the offset lies outside it.
+    + fn lset(key: String, index: int, value: String) !Error {
+        this.run(.{ "LSET", key, index, value }) !>
+    }
+    /// Keeps only the values between two offsets and removes the rest.
+    + fn ltrim(key: String, start: int, stop: int) !Error {
+        this.run(.{ "LTRIM", key, start, stop }) !>
+    }
+    /// Removes values equal to `value` and returns how many were removed.
+    ///
+    /// `count` above 0 removes that many from the head, below 0 that many from the tail, and 0
+    /// removes every one of them.
+    + fn lrem(key: String, value: String, count: int (0)) uint !Error {
+        return (this.run(.{ "LREM", key, count, value }) !>).to_uint()
+    }
+    /// Takes the last value off one list and puts it at the head of another.
+    + fn rpoplpush(key: String, to: String) ?String !Error {
+        return (this.run(.{ "RPOPLPUSH", key, to }) !>).to_string_or_null()
+    }
+
+    /// Waits for a value at the head of a list and takes it off.
+    ///
+    /// Returns null when `timeout_seconds` passes without one; 0 waits forever. The wait happens
+    /// on the server, so the connection is busy until it ends.
+    + fn blpop(key: String, timeout_seconds: uint (0)) ?String !Error {
+        let reply = this.blpop_many(.{ key }, timeout_seconds) !>
+        if !isset(reply) : return null
+        return reply.get(1) !? null
+    }
+    /// Waits for a value at the tail of a list and takes it off.
+    + fn brpop(key: String, timeout_seconds: uint (0)) ?String !Error {
+        let reply = this.brpop_many(.{ key }, timeout_seconds) !>
+        if !isset(reply) : return null
+        return reply.get(1) !? null
+    }
+    /// Waits for a value at the head of any of `keys`, in the order given.
+    ///
+    /// Returns the key it came from and the value, or null when `timeout_seconds` passes.
+    + fn blpop_many(keys: Array[String], timeout_seconds: uint (0)) ?Array[String] !Error {
+        return this.blocking_pop("BLPOP", keys, timeout_seconds) !>
+    }
+    /// Waits for a value at the tail of any of `keys`, in the order given.
+    + fn brpop_many(keys: Array[String], timeout_seconds: uint (0)) ?Array[String] !Error {
+        return this.blocking_pop("BRPOP", keys, timeout_seconds) !>
+    }
+
+    fn blocking_pop(command: String, keys: Array[String], timeout_seconds: uint) ?Array[String] !Error {
+        if keys.length == 0 : return null
+        let args = Array[String]{ command }
+        args.append_many(keys)
+        args.append(timeout_seconds)
+        let reply = this.run(args) !>
+        if reply.is_null() : return null
+        return reply.to_strings()
+    }
+}

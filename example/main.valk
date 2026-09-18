@@ -1,0 +1,65 @@
+use redis
+
+// Run `make server` first, or change the port to the Redis you want to use.
+value PORT (6399)
+
+fn main() {
+    let con = redis.connect("127.0.0.1", PORT) ! panic("Failed to connect: %{E.message}")
+    defer con.close()
+    println("Connected to Redis " + (con.server_version() !? "?"))
+
+    // Strings, with a lifetime
+    con.set("example:greeting", "hello", 60) ! panic("%{E.message}")
+    println("greeting: " + ((con.get("example:greeting") !? null) ?? "<missing>"))
+    println("ttl: " + (con.ttl("example:greeting") !? 0) + "s")
+
+    // Counters
+    con.del("example:visits") ! panic("%{E.message}")
+    let visits = con.incr_by("example:visits", 5) ! panic("%{E.message}")
+    println("visits: " + visits)
+
+    // Hashes
+    con.del("example:user") ! panic("%{E.message}")
+    con.hset_many("example:user", .{ "name" => "Ada", "role" => "admin" }) ! panic("%{E.message}")
+    each con.hgetall("example:user") !? .{} as value, field {
+        println("user." + field + " = " + value)
+    }
+
+    // Sorted sets as a leaderboard
+    con.del("example:board") ! panic("%{E.message}")
+    con.zadd_many("example:board", .{ "ada" => 30, "bob" => 12, "cid" => 55 }) ! panic("%{E.message}")
+    each con.zrange_with_scores("example:board", 0, -1, true) !? .{} as entry, place {
+        println("#" + (place + 1) + " " + entry.member + " (" + entry.score + ")")
+    }
+
+    // One round trip instead of three
+    let pipe = con.pipeline()
+    pipe.add(.{ "SET", "example:a", "1" })
+    pipe.add(.{ "INCR", "example:a" })
+    pipe.add(.{ "GET", "example:a" })
+    let replies = pipe.exec() ! panic("%{E.message}")
+    println("pipelined result: " + (replies.get(2) !? redis.Value.null()).to_string())
+
+    // Publish and subscribe, on two connections
+    let listener = redis.connect("127.0.0.1", PORT) ! panic("%{E.message}")
+    defer listener.close()
+    listener.subscribe(.{ "example:news" }) ! panic("%{E.message}")
+
+    let reader = co read_news(listener)
+    con.publish("example:news", "valk speaks redis") ! panic("%{E.message}")
+    await reader
+
+    con.del_many(.{ "example:greeting", "example:visits", "example:user", "example:board", "example:a" }) ! panic("%{E.message}")
+}
+
+fn read_news(listener: redis.Connection) {
+    let message = listener.next_message(2000) ! {
+        println("read failed: " + E.message)
+        return
+    }
+    if !isset(message) {
+        println("no message arrived")
+        return
+    }
+    println("received on " + message.channel + ": " + message.data)
+}
