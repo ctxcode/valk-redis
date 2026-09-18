@@ -11,7 +11,7 @@ Namespaces: [main](#main)
 
 ```js
 // Thrown by every operation of this package.
-+ error Error (connect, tls, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
++ error Error (connect, tls, auth, protocol, server, cluster, timeout, type, closed) payload { message: String, error_code: String ("") }
 ```
 
 ## Enums for 'main'

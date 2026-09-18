@@ -11,7 +11,7 @@ Namespaces: [main](#main)
 
 ```js
 // Thrown by every operation of this package.
-+ error Error (connect, tls, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
++ error Error (connect, tls, auth, protocol, server, cluster, timeout, type, closed) payload { message: String, error_code: String ("") }
 ```
 
 ### Error
@@ -23,7 +23,11 @@ Thrown by every operation of this package.
 - `auth`: the server rejected the credentials, or asked for credentials that were not given.
 - `protocol`: the server sent bytes this package did not expect.
 - `server`: the server answered with an error reply. `error_code` holds its first word, such as
-  `WRONGTYPE`, `NOSCRIPT` or `MOVED`, and `message` the whole text.
+  `WRONGTYPE` or `NOSCRIPT`, and `message` the whole text.
+- `cluster`: the server is part of a cluster and answered that the command belongs somewhere
+  else, or that the cluster is not serving it. This client talks to one server and does not
+  follow redirects; `error_code` holds the word the server used (`MOVED`, `ASK`,
+  `CROSSSLOT`, `CLUSTERDOWN` or `TRYAGAIN`) and `message` explains what it means.
 - `timeout`: a read ran past the connection timeout.
 - `type`: the reply had another shape than the called method expects.
 - `closed`: the connection is closed.

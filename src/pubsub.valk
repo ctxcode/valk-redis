@@ -129,7 +129,7 @@ extend Connection {
         let seen: uint = 0
         while seen < expected {
             let value = this.read_value(0) !>
-            if value.type == TYPE.error : throw .server { message: value.string_value, error_code: value.code }
+            if value.type == TYPE.error : throw_reply_error(value)
             let message = this.handle_message(value)
             if isset(message) {
                 // A message published before the confirmation arrived

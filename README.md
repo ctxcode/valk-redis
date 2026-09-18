@@ -256,6 +256,7 @@ Every method throws `redis.Error`:
 | `tls` | the TLS handshake failed, or its settings could not be used |
 | `auth` | the credentials were rejected, or none were given where they are needed |
 | `server` | the server answered with an error; `error_code` holds its first word |
+| `cluster` | the server is in a cluster and the command belongs to another node, or the cluster is not serving it |
 | `protocol` | the server sent bytes this package did not expect |
 | `timeout` | a read ran past the connection timeout |
 | `closed` | the connection is closed |
@@ -271,5 +272,8 @@ Override the compiler with `make vc=/path/to/valk test`.
 ## Not supported
 
 Cluster mode (`MOVED` and `ASK` redirects across nodes) and Sentinel are not implemented: a
-connection talks to one server. Client certificates for TLS are not supported either, since
+connection talks to one server. A cluster answer is not passed through as a raw reply, though:
+it throws `cluster`, with `error_code` set to the word the server used and a message saying
+which node the key belongs to, or why the command cannot run as written. So a cluster is
+diagnosed in one line rather than as a puzzling `MOVED 3999 10.0.0.2:6381`. Client certificates for TLS are not supported either, since
 `valk.net` has no client-side certificate setting yet.

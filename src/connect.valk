@@ -151,7 +151,7 @@ value MAX_DEPTH (64)
     /// ```
     + fn run(args: Array[String]) Value !Error {
         let reply = this.run_raw(args) !>
-        if reply.type == TYPE.error : throw .server { message: reply.string_value, error_code: reply.code }
+        if reply.type == TYPE.error : throw_reply_error(reply)
         return reply
     }
 
@@ -329,6 +329,48 @@ value MAX_DEPTH (64)
 fn first_word(text: String) String {
     let space = text.index_of_byte(' ') !? text.length
     return text.range(0, space)
+}
+
+// Turns an error reply into a thrown error. A cluster answer gets an error code and a message
+// of its own, because the raw reply says nothing about what the program should do instead.
+fn throw_reply_error(reply: Value) !Error $throw {
+    let code = reply.code
+    let text = reply.string_value
+    if code == "MOVED" || code == "ASK" {
+        // MOVED 3999 127.0.0.1:6381
+        let node = text
+        let space = text.index_of_byte(' ') !? 0
+        if space > 0 {
+            let rest = text.range(space + 1, text.length - space - 1)
+            let second = rest.index_of_byte(' ') !? 0
+            if second > 0 : node = rest.range(second + 1, rest.length - second - 1)
+        }
+        let moving = code == "ASK" ? " while its slot is moving" : ""
+        let advice = "This client talks to one server and does not follow cluster redirects; connect to that node, or use a cluster proxy or a single endpoint."
+        throw .cluster {
+            error_code: code
+            message: "The key of this command belongs to another node of the cluster (%{node})%{moving}. %{advice}"
+        }
+    }
+    if code == "CROSSSLOT" {
+        throw .cluster {
+            error_code: code
+            message: "The keys of this command live in different slots of the cluster, and a command may only touch keys of one node. Give the keys that belong together the same hash tag, as in `{user:1}:name`, or send one command per key."
+        }
+    }
+    if code == "CLUSTERDOWN" {
+        throw .cluster {
+            error_code: code
+            message: "The cluster is not serving commands: " + text
+        }
+    }
+    if code == "TRYAGAIN" {
+        throw .cluster {
+            error_code: code
+            message: "The cluster is moving the slot of this command; it can be retried in a moment: " + text
+        }
+    }
+    throw .server { message: text, error_code: code }
 }
 
 fn parse_int(text: String) int !Error {

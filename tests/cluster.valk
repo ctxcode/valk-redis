@@ -1,0 +1,115 @@
+use redis
+use valk.net
+
+// A server that answers one command with a canned reply, to check how this package reads the
+// answers a cluster gives. A real cluster is not needed for that, and the replies below are
+// what Redis sends word for word.
+fn canned_server(reply: String) (shared net.TcpServer, u16) !net.NetError {
+    let server = net.tcp_server("127.0.0.1", 0) !>
+    let port = (server.local_address() !>).port
+    co serve_once(server, reply)
+    return (server, port)
+}
+
+fn serve_once(server: shared net.TcpServer, reply: String) {
+    let con = server.accept(5000) ! return
+    let buffer = [u8]{ 0 x 4096 }
+    con.read(buffer) ! { con.close() _ return }
+    con.write(reply) ! {}
+    con.close() _
+}
+
+fn connect_to(port: u16) redis.Connection !redis.Error {
+    return redis.connect("127.0.0.1", port) !>
+}
+
+test "Cluster redirect" {
+    let server, port = canned_server("-MOVED 3999 127.0.0.1:6381\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.get("user:1") ! {
+        // Not a plain `server` error: the program has to do something different
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "MOVED")
+        assert(E.message.contains("127.0.0.1:6381"))
+        assert(E.message.contains("does not follow cluster redirects"))
+        return
+    }
+    assert(false)
+}
+
+test "Cluster slot is moving" {
+    let server, port = canned_server("-ASK 3999 127.0.0.1:6382\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.get("user:1") ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "ASK")
+        assert(E.message.contains("127.0.0.1:6382"))
+        assert(E.message.contains("slot is moving"))
+        return
+    }
+    assert(false)
+}
+
+test "Cluster keys in different slots" {
+    let server, port = canned_server("-CROSSSLOT Keys in request don't hash to the same slot\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.mget(.{ "a", "b" }) ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "CROSSSLOT")
+        assert(E.message.contains("hash tag"))
+        return
+    }
+    assert(false)
+}
+
+test "Cluster is down" {
+    let server, port = canned_server("-CLUSTERDOWN The cluster is down\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.get("x") ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "CLUSTERDOWN")
+        return
+    }
+    assert(false)
+}
+
+test "Cluster asks to try again" {
+    let server, port = canned_server("-TRYAGAIN Multiple keys request during rehashing of slot\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.get("x") ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "TRYAGAIN")
+        assert(E.message.contains("retried"))
+        return
+    }
+    assert(false)
+}
+
+test "An ordinary error stays a server error" {
+    let server, port = canned_server("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n") ! { assert(false) return }
+    defer server.close() _
+    let con = connect_to(port) ! { assert(false) return }
+    defer con.close()
+
+    con.get("x") ! {
+        assert(error_is(E.code, server))
+        assert(E.error_code == "WRONGTYPE")
+        return
+    }
+    assert(false)
+}
