@@ -5,26 +5,37 @@ value RECV_CHUNK (65536)
 // How deep a reply may nest before it is refused
 value MAX_DEPTH (64)
 
-/// Opens a connection and logs in.
+/// Opens a connection described by a `Config` and logs in.
 ///
-/// `password` and `username` are only sent when they are given: a server without a password
-/// needs neither, a server with `requirepass` needs the password alone, and an ACL user needs
-/// both. `protocol` 3 asks for RESP3 with `HELLO`, which needs Redis 6 or newer; the default 2
-/// works with every version and every command of this package.
-///
-/// The connection waits forever for a reply once it is up, so that blocking commands such as
-/// `blpop` work; `set_timeouts` changes that.
-+ fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error {
-    let sock = net.tcp_client(host, port.to(u16), timeout_ms) ! throw .connect { message: "Failed to connect to %{host}:%{port}" }
+/// `connect`, `connect_url` and `Pool` all end up here.
++ fn connect_with(config: Config) Connection !Error {
+    if config.protocol != 2 && config.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
+    let sock = net.tcp_client(config.host, config.port.to(u16), config.timeout_ms) ! {
+        throw .connect { message: "Failed to connect to %{config.host}:%{config.port}" }
+    }
+
+    let tls = config.tls
+    if isset(tls) {
+        let ssl = net.Ssl.new()
+        ssl.set_verify(tls.verify)
+        let ca_file = tls.ca_file
+        if isset(ca_file) : ssl.set_ca_cert(ca_file) ! throw .tls { message: "Cannot read the CA file '" + ca_file + "'" }
+        let ca_dir = tls.ca_dir
+        if isset(ca_dir) : ssl.set_ca_cert_dir(ca_dir) ! throw .tls { message: "Cannot read the CA directory '" + ca_dir + "'" }
+        let host = tls.host.length > 0 ? tls.host : config.host
+        ssl.set_host(host) ! throw .tls { message: "Cannot use '" + host + "' as the certificate name" }
+        sock.ssl_connect(ssl, config.timeout_ms) ! {
+            sock.close() _
+            throw .tls { message: "TLS handshake failed: " + ssl.get_error_message() }
+        }
+    }
 
     let con = Connection {
         con: sock
-        host: host
-        port: port
-        username: username
-        password: password
-        db: db
-        protocol: protocol
+        config: config
+        db: config.db
+        protocol: config.protocol
+        tls_active: isset(tls)
     }
     // A blocking command may wait for a long time; connecting had its own timeout
     sock.set_timeouts(0, 0)
@@ -33,7 +44,6 @@ value MAX_DEPTH (64)
         con.close()
         throw E
     }
-    con.password = "" // clear from memory
 
     return con
 }
@@ -45,16 +55,14 @@ value MAX_DEPTH (64)
 + class Connection {
     con: net.TcpConnection
     //
-    /// The host this connection was opened to.
-    ~ host: String
-    /// The port this connection was opened to.
-    ~ port: u32
-    username: String
-    password: String
+    /// The settings this connection was opened with.
+    + config: Config
     /// The database this connection selected.
     ~ db: uint
     /// The protocol version in use: 2 or 3.
     ~ protocol: uint
+    /// Whether the connection runs over TLS.
+    ~ tls_active: bool (false)
     // Data in
     data_in: ByteBuffer (.new())
     read_offset: uint (0) // Start of the unread bytes in data_in; everything before was consumed
@@ -73,29 +81,29 @@ value MAX_DEPTH (64)
     ~ closed: bool (false)
 
     fn init() !Error {
-        if this.protocol != 2 && this.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
+        let config = this.config
         if this.protocol == 3 {
             let args = Array[String]{ "HELLO", "3" }
-            if this.password.length > 0 {
+            if config.password.length > 0 {
                 args.append("AUTH")
-                args.append(this.username.length > 0 ? this.username : "default")
-                args.append(this.password)
+                args.append(config.username.length > 0 ? config.username : "default")
+                args.append(config.password)
             }
             let reply = this.run(args) ! {
                 if error_is(E.code, server) : throw .auth { message: E.message, error_code: E.error_code }
                 throw E
             }
             this.server_info = reply.to_string_map()
-        } else if this.password.length > 0 {
+        } else if config.password.length > 0 {
             let args = Array[String]{ "AUTH" }
-            if this.username.length > 0 : args.append(this.username)
-            args.append(this.password)
+            if config.username.length > 0 : args.append(config.username)
+            args.append(config.password)
             this.run(args) ! {
                 if error_is(E.code, server) : throw .auth { message: E.message, error_code: E.error_code }
                 throw E
             }
         }
-        if this.db > 0 : this.select(this.db) !>
+        if config.db > 0 : this.select(config.db) !>
     }
 
     /// Selects another database.

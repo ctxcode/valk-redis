@@ -11,7 +11,7 @@ Namespaces: [main](#main)
 
 ```js
 // Thrown by every operation of this package.
-+ error Error (connect, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
++ error Error (connect, tls, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
 ```
 
 ### Error
@@ -19,6 +19,7 @@ Namespaces: [main](#main)
 Thrown by every operation of this package.
 
 - `connect`: the TCP connection could not be opened, or reading and writing failed.
+- `tls`: the TLS handshake failed, or its settings could not be used.
 - `auth`: the server rejected the credentials, or asked for credentials that were not given.
 - `protocol`: the server sent bytes this package did not expect.
 - `server`: the server answered with an error reply. `error_code` holds its first word, such as
@@ -46,9 +47,19 @@ integers that do not fit, and `verbatim` for text with a format hint in `code`.
 ## Functions for 'main'
 
 ```js
+// Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
++ fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
+// Opens a connection described by a URL.
++ fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
+// Opens a connection described by a `Config` and logs in.
++ fn connect_with(config: Config) Connection !Error
 ```
+
+### config_from_url
+
+Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
 
 ### connect
 
@@ -62,27 +73,106 @@ works with every version and every command of this package.
 The connection waits forever for a reply once it is up, so that blocking commands such as
 `blpop` work; `set_timeouts` changes that.
 
+```valk
+let con = redis.connect("127.0.0.1", 6379) ! panic("%{E.message}")
+```
+
+### connect_url
+
+Opens a connection described by a URL.
+
+`redis://` is a plain connection and `rediss://` one over TLS. The URL may carry the
+credentials and the database: `rediss://default:secret@cache.example.com:6380/2`. A
+`protocol=3` in the query string asks for RESP3.
+
+### connect_with
+
+Opens a connection described by a `Config` and logs in.
+
+`connect`, `connect_url` and `Pool` all end up here.
+
 ## Classes for 'main'
+
+```js
+// Everything needed to open a connection.
++ class Config {
+    // The database to select, 0 being the default one.
+    + db: uint
+    // Host name or address of the server.
+    + host: String
+    // The password, or "" for a server without one.
+    + password: String
+    // Port of the server.
+    + port: u32
+    // The protocol to speak: 2 or 3.
+    + protocol: uint
+    // How long connecting may take, in milliseconds.
+    + timeout_ms: uint
+    // TLS settings, or null for a connection without TLS.
+    + tls: ?TlsOptions
+    // The ACL user name, or "" to log in with the password alone.
+    + username: String
+}
+```
+
+### Config
+
+Everything needed to open a connection.
+
+`connect` builds one of these; `connect_with` and `Pool` take one, so that a pool can open
+further connections later. It holds the password for that reason, so keep it out of logs.
+
+#### db
+
+The database to select, 0 being the default one.
+
+#### host
+
+Host name or address of the server.
+
+#### password
+
+The password, or "" for a server without one.
+
+#### port
+
+Port of the server.
+
+#### protocol
+
+The protocol to speak: 2 or 3.
+
+#### timeout_ms
+
+How long connecting may take, in milliseconds.
+
+#### tls
+
+TLS settings, or null for a connection without TLS.
+
+#### username
+
+The ACL user name, or "" to log in with the password alone.
 
 ```js
 // A connection to one server.
 + class Connection {
     // Whether `close` was called, or the server closed the connection.
     ~ closed: bool
+    // The settings this connection was opened with.
+    + config: Config
     // The database this connection selected.
     ~ db: uint
     // Prints every command and reply when true.
     + debug: bool
-    // The host this connection was opened to.
-    ~ host: String
-    // The port this connection was opened to.
-    ~ port: u32
     // The protocol version in use: 2 or 3.
     ~ protocol: uint
     // Server properties reported by `HELLO`, such as `version` and `role`. Empty on RESP2.
     ~ server_info: Map[String]
     // How many channels and patterns this connection is subscribed to.
     ~+ subscriptions: uint
+    // Whether the connection runs over TLS.
+    ~ tls_active: bool
 
     // Appends to a key and returns the new length.
     + fn append(key: String, value: String) uint !Error
@@ -312,6 +402,32 @@ The connection waits forever for a reply once it is up, so that blocking command
     + fn unwatch() void !Error
     // Watches keys for the next transaction: when any of them changes before `exec`, the transaction does not run and `exec` returns null.
     + fn watch(keys: Array[String]) void !Error
+    // Acknowledges entries, so that the group stops counting them as pending.
+    + fn xack(key: String, group: String, ids: Array[String]) uint !Error
+    // Adds an entry to a stream and returns its id.
+    + fn xadd(key: String, fields: Map[String], id: String ("*"), maxlen: uint (0), approximate: bool (true)) String !Error
+    // Takes pending entries over for another consumer, when the one that holds them has not acknowledged them for `min_idle_ms`.
+    + fn xclaim(key: String, group: String, consumer: String, min_idle_ms: uint, ids: Array[String]) Array[StreamEntry] !Error
+    // Removes an entry and returns whether it was there.
+    + fn xdel(key: String, id: String) bool !Error
+    // Creates a consumer group on a stream.
+    + fn xgroup_create(key: String, group: String, id: String ("$"), create_stream: bool (true)) bool !Error
+    // Removes a consumer group and returns whether it was there.
+    + fn xgroup_destroy(key: String, group: String) bool !Error
+    // Returns how many entries a stream holds.
+    + fn xlen(key: String) uint !Error
+    // Returns what a group still owes: how many entries are pending, and who holds them.
+    + fn xpending(key: String, group: String) PendingSummary !Error
+    // Returns the entries between two ids, oldest first.
+    + fn xrange(key: String, start: String ("-"), end: String ("+"), count: uint (0)) Array[StreamEntry] !Error
+    // Reads entries added after the ids given, from one or more streams.
+    + fn xread(streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false)) Array[StreamEntries] !Error
+    // Reads entries for one consumer of a group.
+    + fn xreadgroup(group: String, consumer: String, streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false), no_ack: bool (false)) Array[StreamEntries] !Error
+    // Returns the entries between two ids, newest first. `start` is the higher id here.
+    + fn xrevrange(key: String, start: String ("+"), end: String ("-"), count: uint (0)) Array[StreamEntry] !Error
+    // Trims a stream to `maxlen` entries and returns how many were removed.
+    + fn xtrim(key: String, maxlen: uint, approximate: bool (true)) uint !Error
     // Adds a member to a sorted set, or changes its score, and returns whether it is new.
     + fn zadd(key: String, score: float, member: String) bool !Error
     // Adds several members with their scores and returns how many are new.
@@ -364,6 +480,10 @@ Give every worker its own.
 
 Whether `close` was called, or the server closed the connection.
 
+#### config
+
+The settings this connection was opened with.
+
 #### db
 
 The database this connection selected.
@@ -371,14 +491,6 @@ The database this connection selected.
 #### debug
 
 Prints every command and reply when true.
-
-#### host
-
-The host this connection was opened to.
-
-#### port
-
-The port this connection was opened to.
 
 #### protocol
 
@@ -391,6 +503,10 @@ Server properties reported by `HELLO`, such as `version` and `role`. Empty on RE
 #### subscriptions
 
 How many channels and patterns this connection is subscribed to.
+
+#### tls_active
+
+Whether the connection runs over TLS.
 
 #### append
 
@@ -930,6 +1046,96 @@ Stops watching every watched key.
 Watches keys for the next transaction: when any of them changes before `exec`, the
 transaction does not run and `exec` returns null.
 
+#### xack
+
+Acknowledges entries, so that the group stops counting them as pending.
+
+#### xadd
+
+Adds an entry to a stream and returns its id.
+
+`id` is `*` for an id from the clock, which is what a stream is normally used with, or an
+id of your own. `maxlen` above 0 trims the stream to roughly that many entries, which is
+how a stream is kept from growing without end; `approximate` false trims it exactly, at
+a price.
+
+#### xclaim
+
+Takes pending entries over for another consumer, when the one that holds them has not
+acknowledged them for `min_idle_ms`.
+
+This is how the work of a consumer that died is picked up again.
+
+#### xdel
+
+Removes an entry and returns whether it was there.
+
+#### xgroup_create
+
+Creates a consumer group on a stream.
+
+`id` is where the group starts reading: `$` for entries added from now on, `0` for the
+whole stream. `create_stream` creates the stream when it does not exist yet. Returns
+false when the group was already there.
+
+#### xgroup_destroy
+
+Removes a consumer group and returns whether it was there.
+
+#### xlen
+
+Returns how many entries a stream holds.
+
+#### xpending
+
+Returns what a group still owes: how many entries are pending, and who holds them.
+
+#### xrange
+
+Returns the entries between two ids, oldest first.
+
+`-` and `+` are the lowest and highest possible id, so the default reads the whole
+stream. An id with a `(` in front of it is not included.
+
+#### xread
+
+Reads entries added after the ids given, from one or more streams.
+
+`streams` maps every stream to the last id that was read from it; `$` means everything
+added from now on, which only makes sense together with `block_ms`. `block_ms` above 0
+waits that long for an entry, and 0 in `block_ms` with `block` true waits forever.
+Returns an empty array when nothing arrived.
+
+```valk
+let last = "$"
+while true {
+    let results = con.xread(.{ "events" => last }, 10, 2000) ! break
+    each results as result {
+        each result.entries as entry {
+            println(entry.id + ": " + (entry.fields.get("type") !? ""))
+            last = entry.id
+        }
+    }
+}
+```
+
+#### xreadgroup
+
+Reads entries for one consumer of a group.
+
+`streams` maps every stream to `>` for entries no other consumer has been given, or to
+an id to re-read what this consumer already holds and has not acknowledged. Every entry
+handed out stays pending until `xack`, so that an entry whose consumer died can be
+claimed by another with `xclaim`.
+
+#### xrevrange
+
+Returns the entries between two ids, newest first. `start` is the higher id here.
+
+#### xtrim
+
+Trims a stream to `maxlen` entries and returns how many were removed.
+
 #### zadd
 
 Adds a member to a sorted set, or changes its score, and returns whether it is new.
@@ -1052,6 +1258,40 @@ sharded channel.
 The pattern that matched, for a `pmessage`, and "" otherwise.
 
 ```js
+// What a consumer group still owes: how many entries are pending and who holds them.
++ class PendingSummary {
+    // How many entries each consumer holds.
+    + consumers: Map[uint]
+    // How many entries were delivered and not acknowledged.
+    + count: uint
+    // The highest pending id, or "" when nothing is pending.
+    + highest: String
+    // The lowest pending id, or "" when nothing is pending.
+    + lowest: String
+}
+```
+
+### PendingSummary
+
+What a consumer group still owes: how many entries are pending and who holds them.
+
+#### consumers
+
+How many entries each consumer holds.
+
+#### count
+
+How many entries were delivered and not acknowledged.
+
+#### highest
+
+The highest pending id, or "" when nothing is pending.
+
+#### lowest
+
+The lowest pending id, or "" when nothing is pending.
+
+```js
 // Several commands sent in one go.
 + class Pipeline {
     // How many commands are waiting to be sent.
@@ -1100,6 +1340,111 @@ Sends every command added so far and returns their replies in order.
 
 A command that failed is an `error` value in the result rather than a thrown error, so
 that one failure does not hide the replies of the others.
+
+```js
+// A set of connections that are opened once and handed out as they are needed.
++ class Pool {
+    // Whether `get` checks an idle connection with a `PING` before handing it out, which costs a round trip and catches a connection the server closed in the meantime.
+    + check_on_get: bool
+    // The settings new connections are opened with.
+    + config: Config
+    // How many connections are handed out at this moment.
+    ~ in_use: uint
+    // The greatest number of connections that may exist at one time, idle and handed out together. 0 is no limit.
+    + max_connections: uint
+    // How many idle connections are kept. Connections given back beyond this are closed.
+    + max_idle: uint
+    // How many connections the pool has: idle plus handed out.
+    ~ size: uint
+    // How long `get` waits for a connection to come back when the pool is at its limit, in milliseconds. It throws `timeout` after that; 0 waits forever.
+    + wait_timeout_ms: uint
+
+    // Closes every idle connection. Connections that are handed out are left alone and close when they are given back.
+    + fn close_idle() void
+    // Takes a connection out of the pool, opening one when none is idle.
+    + fn get() Connection !Error
+    // Creates a pool. No connection is opened until the first `get`.
+    + static fn new(config: Config, max_connections: uint (16), max_idle: uint (8)) Pool
+    // Gives a connection back.
+    + fn put(con: Connection) void
+}
+```
+
+### Pool
+
+A set of connections that are opened once and handed out as they are needed.
+
+A pool belongs to one thread, like the connections in it: a server that renders on several
+worker threads gives every thread its own through a `global`, since every thread runs the
+global initializers.
+
+```valk
+global cache: redis.Pool (redis.Pool.new(redis.Config { host: "127.0.0.1" }, 16))
+
+fn handler(req: http.Request) http.Response {
+    let con = cache.get() ! return http.Response.text("cache down", 503)
+    defer cache.put(con)
+    return http.Response.text(con.get("page") !? null ?? "")
+}
+```
+
+`get` hands out an idle connection or opens one, and `put` gives it back, so `put` belongs
+in a `defer` right after the `get`: a connection that is never given back keeps its place in
+the pool until the program ends.
+
+#### check_on_get
+
+Whether `get` checks an idle connection with a `PING` before handing it out, which costs
+a round trip and catches a connection the server closed in the meantime.
+
+#### config
+
+The settings new connections are opened with.
+
+#### in_use
+
+How many connections are handed out at this moment.
+
+#### max_connections
+
+The greatest number of connections that may exist at one time, idle and handed out
+together. 0 is no limit.
+
+#### max_idle
+
+How many idle connections are kept. Connections given back beyond this are closed.
+
+#### size
+
+How many connections the pool has: idle plus handed out.
+
+#### wait_timeout_ms
+
+How long `get` waits for a connection to come back when the pool is at its limit, in
+milliseconds. It throws `timeout` after that; 0 waits forever.
+
+#### close_idle
+
+Closes every idle connection. Connections that are handed out are left alone and close
+when they are given back.
+
+#### get
+
+Takes a connection out of the pool, opening one when none is idle.
+
+Waits when the pool is at `max_connections` and every connection is handed out, and
+throws `timeout` when none comes back in time. Give the connection back with `put`.
+
+#### new
+
+Creates a pool. No connection is opened until the first `get`.
+
+#### put
+
+Gives a connection back.
+
+A connection that is closed, still subscribed, or beyond `max_idle` is closed instead of
+kept, so that what comes out of `get` is always a connection ready for a command.
 
 ```js
 // Walks the keys of a database, or the members of a set, one page at a time.
@@ -1198,6 +1543,92 @@ Creates a script. Nothing is sent to a server until it runs.
 #### run
 
 Runs the script and returns its reply.
+
+```js
+// The entries one stream returned from `xread` or `xreadgroup`.
++ class StreamEntries {
+    // The entries, oldest first.
+    + entries: Array[StreamEntry]
+    // The stream these entries came from.
+    + stream: String
+}
+```
+
+### StreamEntries
+
+The entries one stream returned from `xread` or `xreadgroup`.
+
+#### entries
+
+The entries, oldest first.
+
+#### stream
+
+The stream these entries came from.
+
+```js
+// One entry of a stream: its id and its fields.
++ class StreamEntry {
+    // The fields of the entry.
+    + fields: Map[String]
+    // The id, as `<milliseconds>-<sequence>`.
+    + id: String
+}
+```
+
+### StreamEntry
+
+One entry of a stream: its id and its fields.
+
+#### fields
+
+The fields of the entry.
+
+#### id
+
+The id, as `<milliseconds>-<sequence>`.
+
+```js
+// TLS settings for a connection.
++ class TlsOptions {
+    // A directory of certificate authorities to trust, instead of the system bundle.
+    + ca_dir: ?String
+    // A PEM file with the certificate authorities to trust, instead of the system bundle.
+    + ca_file: ?String
+    // The name to check the certificate against, and to send as SNI. Empty uses the host that was connected to.
+    + host: String
+    // Whether the certificate of the server is checked.
+    + verify: bool
+}
+```
+
+### TlsOptions
+
+TLS settings for a connection.
+
+The defaults verify the server certificate against the system CA bundle, which is what a
+managed Redis with a certificate from a public CA needs. A server with a self-signed
+certificate needs its certificate in `ca_file`, or `verify: false` to check nothing, which
+leaves the connection open to a machine in the middle.
+
+Client certificates are not supported.
+
+#### ca_dir
+
+A directory of certificate authorities to trust, instead of the system bundle.
+
+#### ca_file
+
+A PEM file with the certificate authorities to trust, instead of the system bundle.
+
+#### host
+
+The name to check the certificate against, and to send as SNI. Empty uses the host that
+was connected to.
+
+#### verify
+
+Whether the certificate of the server is checked.
 
 ```js
 // A reply from the server, or one item of a reply.

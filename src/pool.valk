@@ -1,0 +1,125 @@
+use valk.time
+
+/// A set of connections that are opened once and handed out as they are needed.
+///
+/// A pool belongs to one thread, like the connections in it: a server that renders on several
+/// worker threads gives every thread its own through a `global`, since every thread runs the
+/// global initializers.
+///
+/// ```valk
+/// global cache: redis.Pool (redis.Pool.new(redis.Config { host: "127.0.0.1" }, 16))
+///
+/// fn handler(req: http.Request) http.Response {
+///     let con = cache.get() ! return http.Response.text("cache down", 503)
+///     defer cache.put(con)
+///     return http.Response.text(con.get("page") !? null ?? "")
+/// }
+/// ```
+///
+/// `get` hands out an idle connection or opens one, and `put` gives it back, so `put` belongs
+/// in a `defer` right after the `get`: a connection that is never given back keeps its place in
+/// the pool until the program ends.
++ class Pool {
+    /// The settings new connections are opened with.
+    + config: Config
+    /// The greatest number of connections that may exist at one time, idle and handed out
+    /// together. 0 is no limit.
+    + max_connections: uint (16)
+    /// How many idle connections are kept. Connections given back beyond this are closed.
+    + max_idle: uint (8)
+    /// How long `get` waits for a connection to come back when the pool is at its limit, in
+    /// milliseconds. It throws `timeout` after that; 0 waits forever.
+    + wait_timeout_ms: uint (5000)
+    /// Whether `get` checks an idle connection with a `PING` before handing it out, which costs
+    /// a round trip and catches a connection the server closed in the meantime.
+    + check_on_get: bool (false)
+    idle: Array[Connection] (.{})
+    /// How many connections the pool has: idle plus handed out.
+    ~ size: uint (0)
+    /// How many connections are handed out at this moment.
+    ~ in_use: uint (0)
+
+    /// Creates a pool. No connection is opened until the first `get`.
+    + static fn new(config: Config, max_connections: uint (16), max_idle: uint (8)) Pool {
+        return Pool {
+            config: config
+            max_connections: max_connections
+            max_idle: max_idle
+        }
+    }
+
+    /// Takes a connection out of the pool, opening one when none is idle.
+    ///
+    /// Waits when the pool is at `max_connections` and every connection is handed out, and
+    /// throws `timeout` when none comes back in time. Give the connection back with `put`.
+    + fn get() Connection !Error {
+        let deadline: uint = 0
+        if this.wait_timeout_ms > 0 : deadline = time.mono_us() + this.wait_timeout_ms * 1000
+        while true {
+            // An idle connection, newest first: the one least likely to have been dropped
+            while this.idle.length > 0 {
+                let con = this.idle.pop_last() ! break
+                if con.closed {
+                    this.drop()
+                    continue
+                }
+                if this.check_on_get && !con.ping() {
+                    con.close()
+                    this.drop()
+                    continue
+                }
+                this.in_use++
+                return con
+            }
+
+            if this.max_connections == 0 || this.size < this.max_connections {
+                // Count it before connecting, so that concurrent coroutines do not all open one
+                this.size++
+                let con = connect_with(this.config) ! {
+                    this.drop()
+                    throw E
+                }
+                this.in_use++
+                return con
+            }
+
+            // Wait for another coroutine on this thread to give one back
+            if deadline > 0 && time.mono_us() >= deadline {
+                throw .timeout { message: "No connection came back within %{this.wait_timeout_ms}ms" }
+            }
+            time.sleep_ms(1)
+        }
+    }
+
+    /// Gives a connection back.
+    ///
+    /// A connection that is closed, still subscribed, or beyond `max_idle` is closed instead of
+    /// kept, so that what comes out of `get` is always a connection ready for a command.
+    + fn put(con: Connection) {
+        if this.in_use > 0 : this.in_use--
+        if con.closed {
+            this.drop()
+            return
+        }
+        if con.subscriptions > 0 || this.idle.length >= this.max_idle {
+            con.close()
+            this.drop()
+            return
+        }
+        this.idle.append(con)
+    }
+
+    /// Closes every idle connection. Connections that are handed out are left alone and close
+    /// when they are given back.
+    + fn close_idle() {
+        each this.idle as con {
+            con.close()
+            this.drop()
+        }
+        this.idle.clear()
+    }
+
+    fn drop() {
+        if this.size > 0 : this.size--
+    }
+}

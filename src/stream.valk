@@ -1,0 +1,241 @@
+/// One entry of a stream: its id and its fields.
++ class StreamEntry {
+    /// The id, as `<milliseconds>-<sequence>`.
+    + id: String
+    /// The fields of the entry.
+    + fields: Map[String]
+}
+
+/// The entries one stream returned from `xread` or `xreadgroup`.
++ class StreamEntries {
+    /// The stream these entries came from.
+    + stream: String
+    /// The entries, oldest first.
+    + entries: Array[StreamEntry]
+}
+
+/// What a consumer group still owes: how many entries are pending and who holds them.
++ class PendingSummary {
+    /// How many entries were delivered and not acknowledged.
+    + count: uint
+    /// The lowest pending id, or "" when nothing is pending.
+    + lowest: String ("")
+    /// The highest pending id, or "" when nothing is pending.
+    + highest: String ("")
+    /// How many entries each consumer holds.
+    + consumers: Map[uint] (.{})
+}
+
+extend Connection {
+
+    /// Adds an entry to a stream and returns its id.
+    ///
+    /// `id` is `*` for an id from the clock, which is what a stream is normally used with, or an
+    /// id of your own. `maxlen` above 0 trims the stream to roughly that many entries, which is
+    /// how a stream is kept from growing without end; `approximate` false trims it exactly, at
+    /// a price.
+    + fn xadd(key: String, fields: Map[String], id: String ("*"), maxlen: uint (0), approximate: bool (true)) String !Error {
+        let args = Array[String]{ "XADD", key }
+        if maxlen > 0 {
+            args.append("MAXLEN")
+            if approximate : args.append("~")
+            args.append(maxlen)
+        }
+        args.append(id)
+        each fields as value, field {
+            args.append(field)
+            args.append(value)
+        }
+        return (this.run(args) !>).to_string()
+    }
+
+    /// Returns how many entries a stream holds.
+    + fn xlen(key: String) uint !Error {
+        return (this.run(.{ "XLEN", key }) !>).to_uint()
+    }
+
+    /// Returns the entries between two ids, oldest first.
+    ///
+    /// `-` and `+` are the lowest and highest possible id, so the default reads the whole
+    /// stream. An id with a `(` in front of it is not included.
+    + fn xrange(key: String, start: String ("-"), end: String ("+"), count: uint (0)) Array[StreamEntry] !Error {
+        return stream_entries(this.range_command("XRANGE", key, start, end, count) !>)
+    }
+    /// Returns the entries between two ids, newest first. `start` is the higher id here.
+    + fn xrevrange(key: String, start: String ("+"), end: String ("-"), count: uint (0)) Array[StreamEntry] !Error {
+        return stream_entries(this.range_command("XREVRANGE", key, start, end, count) !>)
+    }
+
+    /// Removes an entry and returns whether it was there.
+    + fn xdel(key: String, id: String) bool !Error {
+        return (this.run(.{ "XDEL", key, id }) !>).to_int() > 0
+    }
+    /// Trims a stream to `maxlen` entries and returns how many were removed.
+    + fn xtrim(key: String, maxlen: uint, approximate: bool (true)) uint !Error {
+        let args = Array[String]{ "XTRIM", key, "MAXLEN" }
+        if approximate : args.append("~")
+        args.append(maxlen)
+        return (this.run(args) !>).to_uint()
+    }
+
+    /// Reads entries added after the ids given, from one or more streams.
+    ///
+    /// `streams` maps every stream to the last id that was read from it; `$` means everything
+    /// added from now on, which only makes sense together with `block_ms`. `block_ms` above 0
+    /// waits that long for an entry, and 0 in `block_ms` with `block` true waits forever.
+    /// Returns an empty array when nothing arrived.
+    ///
+    /// ```valk
+    /// let last = "$"
+    /// while true {
+    ///     let results = con.xread(.{ "events" => last }, 10, 2000) ! break
+    ///     each results as result {
+    ///         each result.entries as entry {
+    ///             println(entry.id + ": " + (entry.fields.get("type") !? ""))
+    ///             last = entry.id
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    + fn xread(streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false)) Array[StreamEntries] !Error {
+        let args = Array[String]{ "XREAD" }
+        if count > 0 {
+            args.append("COUNT")
+            args.append(count)
+        }
+        if block_ms > 0 || block {
+            args.append("BLOCK")
+            args.append(block_ms)
+        }
+        args.append("STREAMS")
+        append_streams(args, streams)
+        return stream_results(this.run(args) !>)
+    }
+
+    /// Creates a consumer group on a stream.
+    ///
+    /// `id` is where the group starts reading: `$` for entries added from now on, `0` for the
+    /// whole stream. `create_stream` creates the stream when it does not exist yet. Returns
+    /// false when the group was already there.
+    + fn xgroup_create(key: String, group: String, id: String ("$"), create_stream: bool (true)) bool !Error {
+        let args = Array[String]{ "XGROUP", "CREATE", key, group, id }
+        if create_stream : args.append("MKSTREAM")
+        this.run(args) ! {
+            if error_is(E.code, server) && E.error_code == "BUSYGROUP" : return false
+            throw E
+        }
+        return true
+    }
+    /// Removes a consumer group and returns whether it was there.
+    + fn xgroup_destroy(key: String, group: String) bool !Error {
+        return (this.run(.{ "XGROUP", "DESTROY", key, group }) !>).to_int() > 0
+    }
+
+    /// Reads entries for one consumer of a group.
+    ///
+    /// `streams` maps every stream to `>` for entries no other consumer has been given, or to
+    /// an id to re-read what this consumer already holds and has not acknowledged. Every entry
+    /// handed out stays pending until `xack`, so that an entry whose consumer died can be
+    /// claimed by another with `xclaim`.
+    + fn xreadgroup(group: String, consumer: String, streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false), no_ack: bool (false)) Array[StreamEntries] !Error {
+        let args = Array[String]{ "XREADGROUP", "GROUP", group, consumer }
+        if count > 0 {
+            args.append("COUNT")
+            args.append(count)
+        }
+        if block_ms > 0 || block {
+            args.append("BLOCK")
+            args.append(block_ms)
+        }
+        if no_ack : args.append("NOACK")
+        args.append("STREAMS")
+        append_streams(args, streams)
+        return stream_results(this.run(args) !>)
+    }
+
+    /// Acknowledges entries, so that the group stops counting them as pending.
+    + fn xack(key: String, group: String, ids: Array[String]) uint !Error {
+        if ids.length == 0 : return 0
+        let args = Array[String]{ "XACK", key, group }
+        args.append_many(ids)
+        return (this.run(args) !>).to_uint()
+    }
+
+    /// Returns what a group still owes: how many entries are pending, and who holds them.
+    + fn xpending(key: String, group: String) PendingSummary !Error {
+        let reply = this.run(.{ "XPENDING", key, group }) !>
+        let summary = PendingSummary {
+            count: (reply.get(0) !? Value.null()).to_uint()
+            lowest: (reply.get(1) !? Value.null()).to_string()
+            highest: (reply.get(2) !? Value.null()).to_string()
+        }
+        let consumers = reply.get(3) !? Value.null()
+        each consumers.to_array() as consumer {
+            let name = (consumer.get(0) !? Value.null()).to_string()
+            summary.consumers.set(name, (consumer.get(1) !? Value.null()).to_uint())
+        }
+        return summary
+    }
+
+    /// Takes pending entries over for another consumer, when the one that holds them has not
+    /// acknowledged them for `min_idle_ms`.
+    ///
+    /// This is how the work of a consumer that died is picked up again.
+    + fn xclaim(key: String, group: String, consumer: String, min_idle_ms: uint, ids: Array[String]) Array[StreamEntry] !Error {
+        if ids.length == 0 : return .{}
+        let args = Array[String]{ "XCLAIM", key, group, consumer, min_idle_ms }
+        args.append_many(ids)
+        return stream_entries(this.run(args) !>)
+    }
+
+    fn range_command(command: String, key: String, start: String, end: String, count: uint) Value !Error {
+        let args = Array[String]{ command, key, start, end }
+        if count > 0 {
+            args.append("COUNT")
+            args.append(count)
+        }
+        return this.run(args) !>
+    }
+}
+
+// The STREAMS part of XREAD lists every key first and every id after them
+fn append_streams(args: Array[String], streams: Map[String]) {
+    each streams as id, key {
+        args.append(key)
+    }
+    each streams as id, key {
+        args.append(id)
+    }
+}
+
+// An entry is an id followed by a flat field,value,field,value list
+fn stream_entries(reply: Value) Array[StreamEntry] {
+    let out: Array[StreamEntry] = .{}
+    each reply.to_array() as item {
+        if item.is_null() : continue
+        out.append(StreamEntry {
+            id: (item.get(0) !? Value.null()).to_string()
+            fields: (item.get(1) !? Value.null()).to_string_map()
+        })
+    }
+    return out
+}
+
+// XREAD answers with a stream,entries list on RESP2 and a map on RESP3
+fn stream_results(reply: Value) Array[StreamEntries] {
+    let out: Array[StreamEntries] = .{}
+    if reply.is_null() : return out
+    if reply.type == TYPE.map {
+        each reply.to_map() as entries, stream {
+            out.append(StreamEntries { stream: stream, entries: stream_entries(entries) })
+        }
+        return out
+    }
+    each reply.to_array() as item {
+        out.append(StreamEntries {
+            stream: (item.get(0) !? Value.null()).to_string()
+            entries: stream_entries(item.get(1) !? Value.null())
+        })
+    }
+    return out
+}

@@ -4,7 +4,8 @@
 A Redis client for [Valk](https://valk-lang.dev). Purely written in Valk, with no os-package
 dependencies: it speaks RESP over `valk.net` and needs nothing installed besides a server.
 
-Works with Redis and Valkey, over RESP2 (every version) or RESP3 (Redis 6 and newer).
+Works with Redis and Valkey, over RESP2 (every version) or RESP3 (Redis 6 and newer), with or
+without TLS.
 
 Requires Valk 0.7.2 or newer.
 
@@ -49,6 +50,17 @@ on their own: `con.set("n", 42)` and `con.run(.{ "EXPIRE", key, 60 })` need no f
 ```rust
 // host, port, password, database, username, connect timeout in ms, protocol
 let con = redis.connect("127.0.0.1", 6379, "secret", 0, "", 5000, 3) ! panic("%{E.message}")
+
+// Or from a URL: rediss:// connects over TLS
+let con = redis.connect_url("rediss://default:secret@cache.example.com:6380/2") ! panic("%{E.message}")
+
+// Or from settings, which is also what a pool takes
+let con = redis.connect_with(redis.Config {
+    host: "cache.example.com"
+    port: 6380
+    password: "secret"
+    tls: .{}                        // verifies against the system certificate authorities
+}) ! panic("%{E.message}")
 ```
 
 A password alone is a server with `requirepass`; a username and password together are an ACL
@@ -60,7 +72,46 @@ Once the connection is up it waits forever for a reply, so that blocking command
 `blpop` work. `con.set_timeouts(read_ms, write_ms)` changes that.
 
 A connection carries one command at a time, so it belongs to one coroutine or one thread. Give
-every worker its own.
+every worker its own, or take them from a `Pool`.
+
+### TLS
+
+`tls: .{}` verifies the certificate of the server against the system certificate authorities,
+which is what a managed Redis needs. A server with a self-signed certificate needs that
+certificate:
+
+```rust
+tls: .{ ca_file: "/etc/redis/server.crt" }   // trust this authority instead of the system ones
+tls: .{ verify: false }                      // check nothing, open to a machine in the middle
+tls: .{ host: "cache.internal" }             // name to check and to send as SNI
+```
+
+Client certificates are not supported.
+
+## Pools
+
+A `Pool` opens connections as they are needed and hands them out again afterwards. It belongs
+to one thread, like the connections in it, so a server gives every worker thread its own
+through a `global`:
+
+```rust
+global cache: redis.Pool (redis.Pool.new(redis.Config { host: "127.0.0.1" }, 16))
+
+fn handler(req: http.Request) http.Response {
+    let con = cache.get() ! return http.Response.text("cache down", 503)
+    defer cache.put(con)
+    return http.Response.text((con.get("page") !? null) ?? "")
+}
+```
+
+`get` waits when the pool is at `max_connections` and every connection is handed out, and
+throws `timeout` after `wait_timeout_ms`. Waiting yields to the other coroutines on the thread.
+`max_idle` caps how many connections are kept when they are given back; `check_on_get` pings an
+idle connection first, which costs a round trip and catches one the server dropped.
+
+Keep a blocking command such as `blpop`, and a subscribed connection, out of a pool: both hold
+their connection for as long as they run. A connection that is still subscribed is closed
+rather than kept when it is given back.
 
 ## Replies
 
@@ -140,6 +191,44 @@ while true {
 pattern that matched. On RESP2 a subscribed connection only accepts subscribe, unsubscribe and
 ping commands, so publish from a second connection; RESP3 has no such restriction.
 
+## Streams
+
+```rust
+con.xadd("events", .{ "type" => "signup", "user" => "ada" }) ! panic("%{E.message}")
+
+// Read what is added from now on, waiting up to two seconds at a time
+let last = "$"
+while true {
+    let results = con.xread(.{ "events" => last }, 100, 2000) ! break
+    each results as result {
+        each result.entries as entry {
+            println(entry.id + " " + (entry.fields.get("type") !? ""))
+            last = entry.id
+        }
+    }
+}
+```
+
+With a consumer group, every entry goes to one consumer and stays pending until it is
+acknowledged, so that the work of a consumer that died can be picked up by another:
+
+```rust
+con.xgroup_create("jobs", "workers", "0") ! panic("%{E.message}")
+let results = con.xreadgroup("workers", "worker-1", .{ "jobs" => ">" }, 10, 5000) ! panic("%{E.message}")
+each results as result {
+    each result.entries as entry {
+        handle(entry.fields)
+        con.xack("jobs", "workers", .{ entry.id }) ! panic("%{E.message}")
+    }
+}
+
+let pending = con.xpending("jobs", "workers") ! panic("%{E.message}")   // who still owes what
+con.xclaim("jobs", "workers", "worker-2", 60000, .{ stuck_id }) ! panic("%{E.message}")
+```
+
+`xadd(key, fields, "*", maxlen)` trims as it goes, which is how a stream is kept from growing
+without end.
+
 ## Walking the keyspace
 
 `keys("user:*")` blocks the server while it walks every key. On a database that is in use,
@@ -164,6 +253,7 @@ Every method throws `redis.Error`:
 | code | when |
 | --- | --- |
 | `connect` | the connection could not be opened, or reading and writing failed |
+| `tls` | the TLS handshake failed, or its settings could not be used |
 | `auth` | the credentials were rejected, or none were given where they are needed |
 | `server` | the server answered with an error; `error_code` holds its first word |
 | `protocol` | the server sent bytes this package did not expect |
@@ -172,7 +262,14 @@ Every method throws `redis.Error`:
 
 ## Development
 
-`make server` starts a Redis in docker on port 6399 and `make server-down` removes it again.
-`make test` runs the suite against it, using database 9. `make example` builds and runs the
+`make server` starts two Redis servers in docker, a plain one on port 6399 and one that only
+accepts TLS on 6400 with a self-signed certificate it generates; `make server-down` removes
+them again. `make test` runs the suite against both, using database 9. `make example` builds and runs the
 example, `make lint` checks the sources and `make docs` regenerates the API documentation.
 Override the compiler with `make vc=/path/to/valk test`.
+
+## Not supported
+
+Cluster mode (`MOVED` and `ASK` redirects across nodes) and Sentinel are not implemented: a
+connection talks to one server. Client certificates for TLS are not supported either, since
+`valk.net` has no client-side certificate setting yet.

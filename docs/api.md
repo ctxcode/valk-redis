@@ -11,7 +11,7 @@ Namespaces: [main](#main)
 
 ```js
 // Thrown by every operation of this package.
-+ error Error (connect, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
++ error Error (connect, tls, auth, protocol, server, timeout, type, closed) payload { message: String, error_code: String ("") }
 ```
 
 ## Enums for 'main'
@@ -24,31 +24,59 @@ Namespaces: [main](#main)
 ## Functions for 'main'
 
 ```js
+// Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
++ fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
+// Opens a connection described by a URL.
++ fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
+// Opens a connection described by a `Config` and logs in.
++ fn connect_with(config: Config) Connection !Error
 ```
 
 ## Classes for 'main'
+
+```js
+// Everything needed to open a connection.
++ class Config {
+    // The database to select, 0 being the default one.
+    + db: uint
+    // Host name or address of the server.
+    + host: String
+    // The password, or "" for a server without one.
+    + password: String
+    // Port of the server.
+    + port: u32
+    // The protocol to speak: 2 or 3.
+    + protocol: uint
+    // How long connecting may take, in milliseconds.
+    + timeout_ms: uint
+    // TLS settings, or null for a connection without TLS.
+    + tls: ?TlsOptions
+    // The ACL user name, or "" to log in with the password alone.
+    + username: String
+}
+```
 
 ```js
 // A connection to one server.
 + class Connection {
     // Whether `close` was called, or the server closed the connection.
     ~ closed: bool
+    // The settings this connection was opened with.
+    + config: Config
     // The database this connection selected.
     ~ db: uint
     // Prints every command and reply when true.
     + debug: bool
-    // The host this connection was opened to.
-    ~ host: String
-    // The port this connection was opened to.
-    ~ port: u32
     // The protocol version in use: 2 or 3.
     ~ protocol: uint
     // Server properties reported by `HELLO`, such as `version` and `role`. Empty on RESP2.
     ~ server_info: Map[String]
     // How many channels and patterns this connection is subscribed to.
     ~+ subscriptions: uint
+    // Whether the connection runs over TLS.
+    ~ tls_active: bool
 
     // Appends to a key and returns the new length.
     + fn append(key: String, value: String) uint !Error
@@ -278,6 +306,32 @@ Namespaces: [main](#main)
     + fn unwatch() void !Error
     // Watches keys for the next transaction: when any of them changes before `exec`, the transaction does not run and `exec` returns null.
     + fn watch(keys: Array[String]) void !Error
+    // Acknowledges entries, so that the group stops counting them as pending.
+    + fn xack(key: String, group: String, ids: Array[String]) uint !Error
+    // Adds an entry to a stream and returns its id.
+    + fn xadd(key: String, fields: Map[String], id: String ("*"), maxlen: uint (0), approximate: bool (true)) String !Error
+    // Takes pending entries over for another consumer, when the one that holds them has not acknowledged them for `min_idle_ms`.
+    + fn xclaim(key: String, group: String, consumer: String, min_idle_ms: uint, ids: Array[String]) Array[StreamEntry] !Error
+    // Removes an entry and returns whether it was there.
+    + fn xdel(key: String, id: String) bool !Error
+    // Creates a consumer group on a stream.
+    + fn xgroup_create(key: String, group: String, id: String ("$"), create_stream: bool (true)) bool !Error
+    // Removes a consumer group and returns whether it was there.
+    + fn xgroup_destroy(key: String, group: String) bool !Error
+    // Returns how many entries a stream holds.
+    + fn xlen(key: String) uint !Error
+    // Returns what a group still owes: how many entries are pending, and who holds them.
+    + fn xpending(key: String, group: String) PendingSummary !Error
+    // Returns the entries between two ids, oldest first.
+    + fn xrange(key: String, start: String ("-"), end: String ("+"), count: uint (0)) Array[StreamEntry] !Error
+    // Reads entries added after the ids given, from one or more streams.
+    + fn xread(streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false)) Array[StreamEntries] !Error
+    // Reads entries for one consumer of a group.
+    + fn xreadgroup(group: String, consumer: String, streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false), no_ack: bool (false)) Array[StreamEntries] !Error
+    // Returns the entries between two ids, newest first. `start` is the higher id here.
+    + fn xrevrange(key: String, start: String ("+"), end: String ("-"), count: uint (0)) Array[StreamEntry] !Error
+    // Trims a stream to `maxlen` entries and returns how many were removed.
+    + fn xtrim(key: String, maxlen: uint, approximate: bool (true)) uint !Error
     // Adds a member to a sorted set, or changes its score, and returns whether it is new.
     + fn zadd(key: String, score: float, member: String) bool !Error
     // Adds several members with their scores and returns how many are new.
@@ -334,6 +388,20 @@ Namespaces: [main](#main)
 ```
 
 ```js
+// What a consumer group still owes: how many entries are pending and who holds them.
++ class PendingSummary {
+    // How many entries each consumer holds.
+    + consumers: Map[uint]
+    // How many entries were delivered and not acknowledged.
+    + count: uint
+    // The highest pending id, or "" when nothing is pending.
+    + highest: String
+    // The lowest pending id, or "" when nothing is pending.
+    + lowest: String
+}
+```
+
+```js
 // Several commands sent in one go.
 + class Pipeline {
     // How many commands are waiting to be sent.
@@ -345,6 +413,35 @@ Namespaces: [main](#main)
     + fn clear() void
     // Sends every command added so far and returns their replies in order.
     + fn exec() Array[Value] !Error
+}
+```
+
+```js
+// A set of connections that are opened once and handed out as they are needed.
++ class Pool {
+    // Whether `get` checks an idle connection with a `PING` before handing it out, which costs a round trip and catches a connection the server closed in the meantime.
+    + check_on_get: bool
+    // The settings new connections are opened with.
+    + config: Config
+    // How many connections are handed out at this moment.
+    ~ in_use: uint
+    // The greatest number of connections that may exist at one time, idle and handed out together. 0 is no limit.
+    + max_connections: uint
+    // How many idle connections are kept. Connections given back beyond this are closed.
+    + max_idle: uint
+    // How many connections the pool has: idle plus handed out.
+    ~ size: uint
+    // How long `get` waits for a connection to come back when the pool is at its limit, in milliseconds. It throws `timeout` after that; 0 waits forever.
+    + wait_timeout_ms: uint
+
+    // Closes every idle connection. Connections that are handed out are left alone and close when they are given back.
+    + fn close_idle() void
+    // Takes a connection out of the pool, opening one when none is idle.
+    + fn get() Connection !Error
+    // Creates a pool. No connection is opened until the first `get`.
+    + static fn new(config: Config, max_connections: uint (16), max_idle: uint (8)) Pool
+    // Gives a connection back.
+    + fn put(con: Connection) void
 }
 ```
 
@@ -380,6 +477,40 @@ Namespaces: [main](#main)
     + static fn new(source: String) Script
     // Runs the script and returns its reply.
     + fn run(con: Connection, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
+}
+```
+
+```js
+// The entries one stream returned from `xread` or `xreadgroup`.
++ class StreamEntries {
+    // The entries, oldest first.
+    + entries: Array[StreamEntry]
+    // The stream these entries came from.
+    + stream: String
+}
+```
+
+```js
+// One entry of a stream: its id and its fields.
++ class StreamEntry {
+    // The fields of the entry.
+    + fields: Map[String]
+    // The id, as `<milliseconds>-<sequence>`.
+    + id: String
+}
+```
+
+```js
+// TLS settings for a connection.
++ class TlsOptions {
+    // A directory of certificate authorities to trust, instead of the system bundle.
+    + ca_dir: ?String
+    // A PEM file with the certificate authorities to trust, instead of the system bundle.
+    + ca_file: ?String
+    // The name to check the certificate against, and to send as SNI. Empty uses the host that was connected to.
+    + host: String
+    // Whether the certificate of the server is checked.
+    + verify: bool
 }
 ```
 

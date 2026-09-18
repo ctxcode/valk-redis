@@ -1,0 +1,113 @@
+use valk.url
+
+/// TLS settings for a connection.
+///
+/// The defaults verify the server certificate against the system CA bundle, which is what a
+/// managed Redis with a certificate from a public CA needs. A server with a self-signed
+/// certificate needs its certificate in `ca_file`, or `verify: false` to check nothing, which
+/// leaves the connection open to a machine in the middle.
+///
+/// Client certificates are not supported.
++ class TlsOptions {
+    /// Whether the certificate of the server is checked.
+    + verify: bool (true)
+    /// A PEM file with the certificate authorities to trust, instead of the system bundle.
+    + ca_file: ?String (null)
+    /// A directory of certificate authorities to trust, instead of the system bundle.
+    + ca_dir: ?String (null)
+    /// The name to check the certificate against, and to send as SNI. Empty uses the host that
+    /// was connected to.
+    + host: String ("")
+}
+
+/// Everything needed to open a connection.
+///
+/// `connect` builds one of these; `connect_with` and `Pool` take one, so that a pool can open
+/// further connections later. It holds the password for that reason, so keep it out of logs.
++ class Config {
+    /// Host name or address of the server.
+    + host: String ("127.0.0.1")
+    /// Port of the server.
+    + port: u32 (6379)
+    /// The password, or "" for a server without one.
+    + password: String ("")
+    /// The database to select, 0 being the default one.
+    + db: uint (0)
+    /// The ACL user name, or "" to log in with the password alone.
+    + username: String ("")
+    /// How long connecting may take, in milliseconds.
+    + timeout_ms: uint (5000)
+    /// The protocol to speak: 2 or 3.
+    + protocol: uint (2)
+    /// TLS settings, or null for a connection without TLS.
+    + tls: ?TlsOptions (null)
+}
+
+/// Opens a connection and logs in.
+///
+/// `password` and `username` are only sent when they are given: a server without a password
+/// needs neither, a server with `requirepass` needs the password alone, and an ACL user needs
+/// both. `protocol` 3 asks for RESP3 with `HELLO`, which needs Redis 6 or newer; the default 2
+/// works with every version and every command of this package.
+///
+/// The connection waits forever for a reply once it is up, so that blocking commands such as
+/// `blpop` work; `set_timeouts` changes that.
+///
+/// ```valk
+/// let con = redis.connect("127.0.0.1", 6379) ! panic("%{E.message}")
+/// ```
++ fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error {
+    return connect_with(Config {
+        host: host
+        port: port
+        password: password
+        db: db
+        username: username
+        timeout_ms: timeout_ms
+        protocol: protocol
+    }) !>
+}
+
+/// Opens a connection described by a URL.
+///
+/// `redis://` is a plain connection and `rediss://` one over TLS. The URL may carry the
+/// credentials and the database: `rediss://default:secret@cache.example.com:6380/2`. A
+/// `protocol=3` in the query string asks for RESP3.
++ fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error {
+    return connect_with(config_from_url(text, timeout_ms) !>) !>
+}
+
+/// Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
++ fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error {
+    let parts = url.parse(text)
+    let tls: ?TlsOptions = null
+    if parts.scheme == "rediss" : tls = TlsOptions {}
+    else if parts.scheme != "redis" && parts.scheme != "" {
+        throw .connect { message: "'" + parts.scheme + "' is not a redis URL scheme" }
+    }
+
+    let db: uint = 0
+    let path = parts.path.trim("/")
+    if path.length > 0 {
+        db = path.to_uint() ! throw .connect { message: "'" + path + "' is not a database number" }
+    }
+    let protocol: uint = 2
+    if parts.query.length > 0 {
+        each parts.query.split("&") as pair {
+            let split = pair.index_of_byte('=') ! continue
+            if pair.range(0, split) != "protocol" : continue
+            protocol = pair.range(split + 1, pair.length - split - 1).to_uint() ! throw .connect { message: "The protocol in the URL is not 2 or 3" }
+        }
+    }
+
+    return Config {
+        host: parts.host.length > 0 ? parts.host.trim("[").trim("]") : "127.0.0.1"
+        port: (parts.port ?? 6379).to(u32)
+        password: url.decode(parts.password)
+        username: url.decode(parts.user)
+        db: db
+        protocol: protocol
+        timeout_ms: timeout_ms
+        tls: tls
+    }
+}

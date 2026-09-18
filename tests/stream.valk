@@ -1,0 +1,134 @@
+
+test "Streams" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("stream:events") ! { assert(false) return }
+
+    let first = con.xadd("stream:events", .{ "type" => "signup", "user" => "ada" }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(first.length > 0)
+    let second = con.xadd("stream:events", .{ "type" => "login", "user" => "bob" }) ! { assert(false) return }
+    assert((con.xlen("stream:events") !? 0) == 2)
+
+    // An id of your own is kept
+    let own = con.xadd("stream:events", .{ "type" => "manual" }, "9999999999999-0") ! { assert(false) return }
+    assert(own == "9999999999999-0")
+
+    let all = con.xrange("stream:events") ! { assert(false) return }
+    assert(all.length == 3)
+    let entry = all.get(0) ! { assert(false) return }
+    assert(entry.id == first)
+    assert((entry.fields.get("user") !? "") == "ada")
+    assert((entry.fields.get("type") !? "") == "signup")
+
+    assert((con.xrange("stream:events", "-", "+", 2) !? .{}).length == 2)
+    let newest = con.xrevrange("stream:events", "+", "-", 1) ! { assert(false) return }
+    assert((newest.get(0) ! { assert(false) return }).id == "9999999999999-0")
+
+    // Read what came after an id
+    let results = con.xread(.{ "stream:events" => first }) ! { assert(false) return }
+    assert(results.length == 1)
+    let result = results.get(0) ! { assert(false) return }
+    assert(result.stream == "stream:events")
+    assert(result.entries.length == 2)
+    assert((result.entries.get(0) ! { assert(false) return }).id == second)
+
+    // Nothing after the last id, with a short wait
+    assert((con.xread(.{ "stream:events" => "9999999999999-0" }, 0, 100) !? .{}).length == 0)
+
+    assert(con.xdel("stream:events", own) !? false)
+    assert((con.xlen("stream:events") !? 0) == 2)
+    con.del("stream:events") ! { assert(false) return }
+}
+
+test "Stream trimming" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("stream:trim") ! { assert(false) return }
+
+    let i: uint = 0
+    while i++ < 50 : con.xadd("stream:trim", .{ "n" => i }) ! { assert(false) return }
+    assert((con.xlen("stream:trim") !? 0) == 50)
+
+    // An exact trim leaves exactly that many
+    assert((con.xtrim("stream:trim", 10, false) !? 0) == 40)
+    assert((con.xlen("stream:trim") !? 0) == 10)
+
+    // Adding with a cap trims as it goes
+    con.xadd("stream:trim", .{ "n" => "last" }, "*", 5, false) ! { assert(false) return }
+    assert((con.xlen("stream:trim") !? 0) == 5)
+    con.del("stream:trim") ! { assert(false) return }
+}
+
+test "Consumer groups" {
+    let con = connect() ! { assert(false) return }
+    defer con.close()
+    con.del("stream:jobs") ! { assert(false) return }
+
+    assert(con.xgroup_create("stream:jobs", "workers", "0") !? false)
+    assert(!(con.xgroup_create("stream:jobs", "workers", "0") !? true)) // already there
+
+    con.xadd("stream:jobs", .{ "job" => "a" }) ! { assert(false) return }
+    con.xadd("stream:jobs", .{ "job" => "b" }) ! { assert(false) return }
+
+    // Two consumers each get their own entries
+    let for_one = con.xreadgroup("workers", "one", .{ "stream:jobs" => ">" }, 1) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(for_one.length == 1)
+    let one_entries = (for_one.get(0) ! { assert(false) return }).entries
+    assert(one_entries.length == 1)
+    let first_job = one_entries.get(0) ! { assert(false) return }
+    assert((first_job.fields.get("job") !? "") == "a")
+
+    let for_two = con.xreadgroup("workers", "two", .{ "stream:jobs" => ">" }, 1) ! { assert(false) return }
+    let two_entries = (for_two.get(0) ! { assert(false) return }).entries
+    assert((two_entries.get(0) ! { assert(false) return }.fields.get("job") !? "") == "b")
+
+    // Both are pending until they are acknowledged
+    let pending = con.xpending("stream:jobs", "workers") ! { println(E.message) assert(false) return }
+    assert(pending.count == 2)
+    assert(pending.consumers.length == 2)
+    assert((pending.consumers.get("one") !? 0) == 1)
+
+    assert((con.xack("stream:jobs", "workers", .{ first_job.id }) !? 0) == 1)
+    assert((con.xpending("stream:jobs", "workers") ! { assert(false) return }).count == 1)
+
+    // A consumer that stopped working: another takes its entry over
+    let claimed = con.xclaim("stream:jobs", "workers", "one", 0, .{ (two_entries.get(0) ! { assert(false) return }).id }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(claimed.length == 1)
+    let after_claim = con.xpending("stream:jobs", "workers") ! { assert(false) return }
+    assert((after_claim.consumers.get("one") !? 0) == 1)
+
+    // Nothing new left for the group
+    assert((con.xreadgroup("workers", "one", .{ "stream:jobs" => ">" }) !? .{}).length == 0)
+
+    assert(con.xgroup_destroy("stream:jobs", "workers") !? false)
+    con.del("stream:jobs") ! { assert(false) return }
+}
+
+test "Streams on RESP3" {
+    let con = connect(3) ! { assert(false) return }
+    defer con.close()
+    con.del("stream:resp3") ! { assert(false) return }
+
+    con.xadd("stream:resp3", .{ "a" => "1" }) ! { assert(false) return }
+    // RESP3 answers XREAD with a map instead of an array of pairs
+    let results = con.xread(.{ "stream:resp3" => "0" }) ! { println(E.message) assert(false) return }
+    assert(results.length == 1)
+    let result = results.get(0) ! { assert(false) return }
+    assert(result.stream == "stream:resp3")
+    assert(result.entries.length == 1)
+    assert(((result.entries.get(0) ! { assert(false) return }).fields.get("a") !? "") == "1")
+
+    con.del("stream:resp3") ! { assert(false) return }
+}

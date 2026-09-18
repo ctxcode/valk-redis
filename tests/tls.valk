@@ -1,0 +1,95 @@
+use redis
+
+value TLS_PORT (6400)
+
+// The certificate tests/server.sh generated, which is its own authority
+fn tls_ca() String {
+    return __DIR__ + "/certs/server.crt"
+}
+
+test "TLS" {
+    let con = redis.connect_with(redis.Config {
+        host: "localhost"
+        port: TLS_PORT
+        db: TEST_DB
+        tls: .{ ca_file: tls_ca() }
+    }) ! {
+        println("connect: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+
+    assert(con.tls_active)
+    assert(con.ping())
+    con.set("tls:key", "over tls") ! { assert(false) return }
+    assert((con.get("tls:key") !? null) == "over tls")
+
+    // Large values cross several TLS records
+    let value = String.random(200000)
+    con.set("tls:big", value) ! { assert(false) return }
+    assert((con.get("tls:big") !? null) == value)
+    con.del_many(.{ "tls:key", "tls:big" }) ! { assert(false) return }
+}
+
+test "TLS rejects an untrusted certificate" {
+    // The server certificate is self-signed, so the system authorities do not cover it
+    redis.connect_with(redis.Config { host: "localhost", port: TLS_PORT, tls: .{} }) ! {
+        assert(error_is(E.code, tls))
+        return
+    }
+    assert(false)
+}
+
+test "TLS without verification" {
+    let con = redis.connect_with(redis.Config {
+        host: "localhost"
+        port: TLS_PORT
+        db: TEST_DB
+        tls: .{ verify: false }
+    }) ! { println(E.message) assert(false) return }
+    defer con.close()
+    assert(con.ping())
+}
+
+test "TLS is required by that server" {
+    // Speaking plain RESP to a TLS port gets nowhere
+    let con = redis.connect("localhost", TLS_PORT, "", TEST_DB, "", 2000) ! {
+        assert(error_is(E.code, connect) || error_is(E.code, closed) || error_is(E.code, protocol))
+        return
+    }
+    con.close()
+    assert(false)
+}
+
+test "Connect by URL" {
+    let con = redis.connect_url("redis://127.0.0.1:" + TEST_PORT + "/" + TEST_DB) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    assert(con.db == TEST_DB)
+    assert(con.protocol == 2)
+    assert(con.ping())
+
+    let resp3 = redis.connect_url("redis://127.0.0.1:" + TEST_PORT + "/1?protocol=3") ! { assert(false) return }
+    defer resp3.close()
+    assert(resp3.db == 1)
+    assert(resp3.protocol == 3)
+
+    // A rediss:// URL asks for TLS
+    let config = redis.config_from_url("rediss://user:pa%40ss@cache.example.com:6380/3") ! { assert(false) return }
+    assert(config.host == "cache.example.com")
+    assert(config.port == 6380)
+    assert(config.username == "user")
+    assert(config.password == "pa@ss") // percent-decoded
+    assert(config.db == 3)
+    assert(isset(config.tls))
+
+    redis.config_from_url("http://127.0.0.1") ! {
+        assert(error_is(E.code, connect))
+        return
+    }
+    assert(false)
+}

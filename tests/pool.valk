@@ -1,0 +1,101 @@
+use valk.time
+use redis
+
+fn test_config() redis.Config {
+    return redis.Config { host: "127.0.0.1", port: TEST_PORT, db: TEST_DB }
+}
+
+test "Pool" {
+    let pool = redis.Pool.new(test_config(), 4, 2)
+    assert(pool.size == 0)
+
+    let con = pool.get() ! { println(E.message) assert(false) return }
+    assert(pool.size == 1)
+    assert(pool.in_use == 1)
+    con.set("pool:key", "value") ! { assert(false) return }
+    pool.put(con)
+    assert(pool.in_use == 0)
+    assert(pool.size == 1)
+
+    // The same connection comes back out
+    let again = pool.get() ! { assert(false) return }
+    assert(pool.size == 1)
+    assert((again.get("pool:key") !? null) == "value")
+    pool.put(again)
+
+    // Several at once open several connections
+    let a = pool.get() ! { assert(false) return }
+    let b = pool.get() ! { assert(false) return }
+    let c = pool.get() ! { assert(false) return }
+    assert(pool.size == 3)
+    assert(pool.in_use == 3)
+    pool.put(a)
+    pool.put(b)
+    // max_idle is 2, so the third is closed instead of kept
+    pool.put(c)
+    assert(pool.size == 2)
+    assert(pool.in_use == 0)
+
+    pool.close_idle()
+    assert(pool.size == 0)
+
+    let last = pool.get() ! { assert(false) return }
+    last.del("pool:key") ! { assert(false) return }
+    pool.put(last)
+    pool.close_idle()
+}
+
+test "Pool limit" {
+    let pool = redis.Pool.new(test_config(), 2, 2)
+    pool.wait_timeout_ms = 200
+
+    let a = pool.get() ! { assert(false) return }
+    let b = pool.get() ! { assert(false) return }
+    assert(pool.size == 2)
+
+    // The pool is at its limit and nothing comes back
+    pool.get() ! {
+        assert(error_is(E.code, timeout))
+        pool.put(a)
+        pool.put(b)
+        pool.close_idle()
+        return
+    }
+    assert(false)
+}
+
+test "Pool waits for a connection" {
+    let pool = redis.Pool.new(test_config(), 1, 1)
+    pool.wait_timeout_ms = 3000
+
+    let held = pool.get() ! { assert(false) return }
+    // Another coroutine gives it back while this one waits for it
+    let giving_back = co give_back(pool, held)
+    let second = pool.get() ! { println(E.message) assert(false) return }
+    assert(second.ping())
+    await giving_back
+    pool.put(second)
+    pool.close_idle()
+}
+
+fn give_back(pool: redis.Pool, con: redis.Connection) {
+    time.sleep_ms(50)
+    pool.put(con)
+}
+
+test "Pool drops a broken connection" {
+    let pool = redis.Pool.new(test_config(), 4, 4)
+    pool.check_on_get = true
+
+    let con = pool.get() ! { assert(false) return }
+    con.close() // as if the server had dropped it
+    pool.put(con)
+    assert(pool.size == 0)
+
+    let fresh = pool.get() ! { assert(false) return }
+    assert(fresh.ping())
+    pool.put(fresh)
+    assert(pool.size == 1)
+    pool.close_idle()
+    assert(pool.size == 0)
+}
