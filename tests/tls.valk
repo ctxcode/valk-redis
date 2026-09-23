@@ -41,6 +41,82 @@ test "TLS rejects an untrusted certificate" {
     assert(false)
 }
 
+value MTLS_PORT (6404)
+
+// The client certificate tests/server.sh generated for the server that asks for one
+fn tls_file(name: String) String {
+    return __DIR__ + "/certs/" + name
+}
+fn mtls_works(tls: redis.TlsOptions) bool {
+    let con = redis.connect_with(redis.Config { host: "localhost", port: MTLS_PORT, db: TEST_DB, timeout_ms: 2000, tls: tls }) ! return false
+    defer con.close()
+    return con.ping()
+}
+
+test "TLS client certificate" {
+    // That server refuses a client without a certificate
+    assert(!mtls_works(.{ ca_file: tls_ca() }))
+
+    let con = redis.connect_with(redis.Config {
+        host: "localhost"
+        port: MTLS_PORT
+        db: TEST_DB
+        tls: .{
+            ca_file: tls_ca()
+            certificate_file: tls_file("client.crt")
+            private_key_file: tls_file("client.key")
+        }
+    }) ! {
+        println("connect: " + E.message)
+        assert(false)
+        return
+    }
+    defer con.close()
+    assert(con.tls_active)
+    con.set("tls:mtls", "with a certificate") ! { assert(false) return }
+    assert((con.get("tls:mtls") !? null) == "with a certificate")
+    con.del("tls:mtls") ! { assert(false) return }
+
+    // An encrypted key with its password
+    assert(mtls_works(.{
+        ca_file: tls_ca()
+        certificate_file: tls_file("client.crt")
+        private_key_file: tls_file("client-encrypted.key")
+        key_password: "secret"
+    }))
+}
+
+test "TLS client certificate errors" {
+    // A wrong password, and a key of another certificate, fail before the handshake
+    redis.connect_with(redis.Config {
+        host: "localhost"
+        port: MTLS_PORT
+        tls: .{
+            ca_file: tls_ca()
+            certificate_file: tls_file("client.crt")
+            private_key_file: tls_file("client-encrypted.key")
+            key_password: "wrong"
+        }
+    }) ! {
+        assert(error_is(E.code, tls))
+        redis.connect_with(redis.Config {
+            host: "localhost"
+            port: MTLS_PORT
+            tls: .{
+                ca_file: tls_ca()
+                certificate_file: tls_file("client.crt")
+                private_key_file: tls_file("server.key")
+            }
+        }) ! {
+            assert(error_is(E.code, tls))
+            return
+        }
+        assert(false)
+        return
+    }
+    assert(false)
+}
+
 test "TLS without verification" {
     let con = redis.connect_with(redis.Config {
         host: "localhost"

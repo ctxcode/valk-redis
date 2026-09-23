@@ -537,8 +537,14 @@ Namespaces: [main](#main)
     + ca_dir: ?String
     // A PEM file with the certificate authorities to trust, instead of the system bundle.
     + ca_file: ?String
+    // A PEM file with the client certificate, optionally followed by the intermediate certificates, sent when the server asks for one.
+    + certificate_file: ?String
     // The name to check the certificate against, and to send as SNI. Empty uses the host that was connected to.
     + host: String
+    // The password of an encrypted private key.
+    + key_password: String
+    // The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
+    + private_key_file: ?String
     // Whether the certificate of the server is checked.
     + verify: bool
 }

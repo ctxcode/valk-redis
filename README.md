@@ -7,7 +7,7 @@ dependencies: it speaks RESP over `valk.net` and needs nothing installed besides
 Works with Redis and Valkey, over RESP2 (every version) or RESP3 (Redis 6 and newer), with or
 without TLS.
 
-Requires Valk 0.7.2 or newer.
+Requires Valk 0.7.5 or newer.
 
 ## Install
 
@@ -86,7 +86,16 @@ tls: .{ verify: false }                      // check nothing, open to a machine
 tls: .{ host: "cache.internal" }             // name to check and to send as SNI
 ```
 
-Client certificates are not supported.
+A server started with `tls-auth-clients yes` wants a certificate from the client as well:
+
+```rust
+tls: .{
+    ca_file: "/etc/redis/ca.crt"
+    certificate_file: "/etc/redis/client.crt"
+    private_key_file: "/etc/redis/client.key"
+    key_password: ""                         // for an encrypted key
+}
+```
 
 ## Sentinel
 
@@ -290,7 +299,8 @@ Every method throws `redis.Error`:
 ## Development
 
 `make server` starts the Redis servers in docker: a plain one on 6399, one that only accepts TLS
-on 6400 with a self-signed certificate it generates, and a primary on 6401 with a replica on 6402
+on 6400 with a self-signed certificate it generates, one on 6404 that also wants a client
+certificate signed by a test CA it generates, and a primary on 6401 with a replica on 6402
 and a sentinel on 6403 watching them. `make server-down` removes them again. `make test` runs the
 suite against all of it, using database 9.
 
@@ -305,5 +315,4 @@ Cluster mode (`MOVED` and `ASK` redirects across nodes) is not implemented: a co
 one server. Sentinel is, see above. A cluster answer is not passed through as a raw reply, though:
 it throws `cluster`, with `error_code` set to the word the server used and a message saying
 which node the key belongs to, or why the command cannot run as written. So a cluster is
-diagnosed in one line rather than as a puzzling `MOVED 3999 10.0.0.2:6381`. Client certificates for TLS are not supported either, since
-`valk.net` has no client-side certificate setting yet.
+diagnosed in one line rather than as a puzzling `MOVED 3999 10.0.0.2:6381`.

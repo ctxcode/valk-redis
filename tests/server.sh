@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# Starts or stops the Redis servers the tests run against: a plain one, and one that only
-# accepts TLS, with a self-signed certificate generated here.
+# Starts or stops the Redis servers the tests run against: a plain one, one that only accepts
+# TLS, with a self-signed certificate generated here, and one that also wants a client
+# certificate signed by a test CA generated here.
 set -e
 
 NAME=valk-redis-test
 TLS_NAME=valk-redis-test-tls
+MTLS_NAME=valk-redis-test-mtls
 MASTER_NAME=valk-redis-master
 REPLICA_NAME=valk-redis-replica
 SENTINEL_NAME=valk-redis-sentinel
 PORT=${REDIS_PORT:-6399}
 TLS_PORT=${REDIS_TLS_PORT:-6400}
+MTLS_PORT=${REDIS_MTLS_PORT:-6404}
 MASTER_PORT=${REDIS_MASTER_PORT:-6401}
 REPLICA_PORT=${REDIS_REPLICA_PORT:-6402}
 SENTINEL_PORT=${REDIS_SENTINEL_PORT:-6403}
@@ -45,6 +48,32 @@ case "${1:-up}" in
         fi
         echo "redis over tls listening on 127.0.0.1:${TLS_PORT}"
 
+        # A client certificate for the tests, its key also stored encrypted (password: secret)
+        if [ ! -f "${CERTS}/client.crt" ]; then
+            openssl req -new -x509 -days 3650 -nodes -subj "/CN=valk-redis client CA" \
+                -keyout "${CERTS}/client-ca.key" -out "${CERTS}/client-ca.crt" 2>/dev/null
+            openssl req -new -nodes -subj "/CN=valk-redis test client" \
+                -keyout "${CERTS}/client.key" -out "${CERTS}/client.csr" 2>/dev/null
+            openssl x509 -req -in "${CERTS}/client.csr" -CA "${CERTS}/client-ca.crt" \
+                -CAkey "${CERTS}/client-ca.key" -CAcreateserial -days 3650 \
+                -out "${CERTS}/client.crt" 2>/dev/null
+            openssl pkey -in "${CERTS}/client.key" -aes256 -passout pass:secret \
+                -out "${CERTS}/client-encrypted.key"
+            rm -f "${CERTS}/client.csr"
+        fi
+        if [ -n "$(docker ps -aq -f name=^${MTLS_NAME}$)" ]; then
+            docker start ${MTLS_NAME} >/dev/null
+        else
+            docker run -d --name ${MTLS_NAME} -p ${MTLS_PORT}:6379 \
+                -v "${CERTS}":/certs:ro ${IMAGE} \
+                redis-server --port 0 --tls-port 6379 \
+                --tls-cert-file /certs/server.crt \
+                --tls-key-file /certs/server.key \
+                --tls-ca-cert-file /certs/client-ca.crt \
+                --tls-auth-clients yes >/dev/null
+        fi
+        echo "redis over tls with client certificates listening on 127.0.0.1:${MTLS_PORT}"
+
         # A primary, a replica of it, and a sentinel watching them, for connect_sentinel
         if [ -n "$(docker ps -aq -f name=^${MASTER_NAME}$)" ]; then
             docker start ${MASTER_NAME} >/dev/null
@@ -77,7 +106,7 @@ CONF
         echo "redis primary on 127.0.0.1:${MASTER_PORT}, replica on ${REPLICA_PORT}, sentinel on ${SENTINEL_PORT}"
         ;;
     down)
-        docker rm -f ${NAME} ${TLS_NAME} ${MASTER_NAME} ${REPLICA_NAME} ${SENTINEL_NAME} >/dev/null 2>&1 || true
+        docker rm -f ${NAME} ${TLS_NAME} ${MTLS_NAME} ${MASTER_NAME} ${REPLICA_NAME} ${SENTINEL_NAME} >/dev/null 2>&1 || true
         rm -rf "${CERTS}"
         echo "removed the test servers"
         ;;

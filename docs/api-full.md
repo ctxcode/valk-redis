@@ -1706,8 +1706,14 @@ The id, as `<milliseconds>-<sequence>`.
     + ca_dir: ?String
     // A PEM file with the certificate authorities to trust, instead of the system bundle.
     + ca_file: ?String
+    // A PEM file with the client certificate, optionally followed by the intermediate certificates, sent when the server asks for one.
+    + certificate_file: ?String
     // The name to check the certificate against, and to send as SNI. Empty uses the host that was connected to.
     + host: String
+    // The password of an encrypted private key.
+    + key_password: String
+    // The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
+    + private_key_file: ?String
     // Whether the certificate of the server is checked.
     + verify: bool
 }
@@ -1722,7 +1728,8 @@ managed Redis with a certificate from a public CA needs. A server with a self-si
 certificate needs its certificate in `ca_file`, or `verify: false` to check nothing, which
 leaves the connection open to a machine in the middle.
 
-Client certificates are not supported.
+A server started with `tls-auth-clients yes` wants a client certificate: set
+`certificate_file` and `private_key_file`.
 
 #### ca_dir
 
@@ -1732,10 +1739,23 @@ A directory of certificate authorities to trust, instead of the system bundle.
 
 A PEM file with the certificate authorities to trust, instead of the system bundle.
 
+#### certificate_file
+
+A PEM file with the client certificate, optionally followed by the intermediate
+certificates, sent when the server asks for one.
+
 #### host
 
 The name to check the certificate against, and to send as SNI. Empty uses the host that
 was connected to.
+
+#### key_password
+
+The password of an encrypted private key.
+
+#### private_key_file
+
+The PEM private key of `certificate_file`. Null reads it from `certificate_file`.
 
 #### verify
 

@@ -22,6 +22,15 @@ value MAX_DEPTH (64)
         if isset(ca_file) : ssl.set_ca_cert(ca_file) ! throw .tls { message: "Cannot read the CA file '" + ca_file + "'" }
         let ca_dir = tls.ca_dir
         if isset(ca_dir) : ssl.set_ca_cert_dir(ca_dir) ! throw .tls { message: "Cannot read the CA directory '" + ca_dir + "'" }
+        let certificate = tls.certificate_file
+        if isset(certificate) {
+            let key_file = tls.private_key_file
+            let key = isset(key_file) ? key_file : certificate
+            ssl.set_certificate(certificate, key, tls.key_password) ! {
+                sock.close() _
+                throw .tls { message: "Cannot use the client certificate '" + certificate + "' with the key '" + key + "'" }
+            }
+        }
         let host = tls.host.length > 0 ? tls.host : config.host
         ssl.set_host(host) ! throw .tls { message: "Cannot use '" + host + "' as the certificate name" }
         sock.ssl_connect(ssl, config.timeout_ms) ! {
