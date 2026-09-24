@@ -115,13 +115,9 @@ passed over. The connection is then checked with `ROLE`, so a sentinel that is b
 failover cannot hand you a replica to write to; `check_role: false` turns that off.
 
 `redis.sentinel_replicas(config)` lists the replicas the sentinels know, as `host:port`, for
-reads that may be a moment behind the primary. A pool that opens its connections with
-`connect_sentinel` follows a failover by itself, since each new connection asks again:
-
-```rust
-global pool: sql.Pool (…)   // or, for redis:
-let con = redis.connect_sentinel(config) ! …
-```
+reads that may be a moment behind the primary. Each `connect_sentinel` asks again, so a
+connection opened after a failover reaches the new primary. A `Pool` connects to the fixed
+address of its `Config` and does not ask the sentinels.
 
 ## Pools
 
