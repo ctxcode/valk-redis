@@ -40,12 +40,8 @@
 /// }) ! panic("%{E.message}")
 /// ```
 ///
-/// A pool opens its connections the same way, so a failover reaches the whole program:
-///
-/// ```valk
-/// global pool: redis.Pool (redis.Pool.new(redis.Config {}, 8))
-/// // ... or open each connection with connect_sentinel in your own opener
-/// ```
+/// A pool made with `Pool.from_sentinel` opens its connections this way, and follows a
+/// failover.
 + fn connect_sentinel(config: SentinelConfig) Connection !Error {
     if config.sentinels.length == 0 : throw .connect { message: "No sentinel was given to ask" }
 

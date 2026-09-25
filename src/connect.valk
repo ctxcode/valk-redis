@@ -87,6 +87,9 @@ value MAX_DEPTH (64)
     + debug: bool (false)
     /// Whether `close` was called, or the server closed the connection.
     ~ closed: bool (false)
+    /// Whether the server refused a write with `READONLY`: it is a replica now, as a primary
+    /// becomes one after a failover. A pool made with `Pool.from_sentinel` drops it.
+    ~ saw_readonly: bool (false)
 
     fn init() !Error {
         let config = this.config
@@ -229,7 +232,9 @@ value MAX_DEPTH (64)
         if type == '+' : return Value { type: TYPE.string, string_value: rest }
         if type == ':' : return Value { type: TYPE.int, int_value: parse_int(rest) !> }
         if type == '-' {
-            return Value { type: TYPE.error, string_value: rest, code: first_word(rest) }
+            let code = first_word(rest)
+            if code == "READONLY" : this.saw_readonly = true
+            return Value { type: TYPE.error, string_value: rest, code: code }
         }
         if type == '_' : return Value.null() // RESP3 null
         if type == '#' : return Value { type: TYPE.bool, bool_value: rest == "t" } // RESP3 bool
@@ -240,7 +245,11 @@ value MAX_DEPTH (64)
             let length = parse_int(rest) !>
             if length < 0 : return Value.null() // RESP2 null bulk string
             let data = this.read_bytes(length.to(uint)) !>
-            if type == '!' : return Value { type: TYPE.error, string_value: data, code: first_word(data) }
+            if type == '!' {
+                let code = first_word(data)
+                if code == "READONLY" : this.saw_readonly = true
+                return Value { type: TYPE.error, string_value: data, code: code }
+            }
             if type == '=' {
                 // Verbatim string: three letters, a colon, then the text
                 if data.length >= 4 && data[3] == ':' {

@@ -116,8 +116,22 @@ failover cannot hand you a replica to write to; `check_role: false` turns that o
 
 `redis.sentinel_replicas(config)` lists the replicas the sentinels know, as `host:port`, for
 reads that may be a moment behind the primary. Each `connect_sentinel` asks again, so a
-connection opened after a failover reaches the new primary. A `Pool` connects to the fixed
-address of its `Config` and does not ask the sentinels.
+connection opened after a failover reaches the new primary.
+
+A pool made with `Pool.from_sentinel` opens its connections the same way and follows a
+failover by itself. A connection that was dropped, or that met `READONLY` because its server
+became a replica, is closed when it is given back, together with the idle ones, and the next
+`get` asks the sentinels again. The command that ran into the failover still fails; retry it
+when that is safe:
+
+```rust
+global cache: redis.Pool (redis.Pool.from_sentinel(redis.SentinelConfig {
+    sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379" }
+    master_name: "cache"
+}, 16))
+```
+
+A pool made with `Pool.new` connects to the fixed address of its `Config`.
 
 ## Pools
 

@@ -140,3 +140,70 @@ synctest "A failover reaches the next connection" {
     let started, started_output = core.exec("docker start " + name)
     time.sleep_ms(1000)
 }
+
+// Asks the sentinel for a failover; it refuses while the replica is still catching up
+fn sentinel_failover() bool {
+    let sentinel = redis.connect("127.0.0.1", 6403, "", 0, "", 5000) ! return false
+    defer sentinel.close()
+    let attempt: uint = 0
+    while attempt++ < 50 {
+        sentinel.run(.{ "SENTINEL", "FAILOVER", "valk-test" }) ! {
+            time.sleep_ms(200)
+            continue
+        }
+        return true
+    }
+    return false
+}
+
+// Whether the server on `port` has been turned into a replica
+fn is_replica(port: u32) bool {
+    let con = redis.connect("127.0.0.1", port, "", 0, "", 5000) ! return false
+    defer con.close()
+    let role = con.run(.{ "ROLE" }) ! return false
+    return (role.get(0) !? redis.Value.null()).to_string() == "slave"
+}
+
+synctest "A pool made from the sentinels follows a failover" {
+    let config = sentinel_config()
+    let pool = redis.Pool.from_sentinel(config, 4)
+    let first = pool.get() ! { println(E.message) assert(false) return }
+    let second = pool.get() ! { println(E.message) assert(false) return }
+    let old_port = first.config.port
+    first.set("pool:failover", "before") ! { println(E.message) assert(false) return }
+    pool.put(first)
+    pool.put(second)
+    assert(pool.size == 2)
+
+    // The sentinel promotes the replica, and turns the old primary into one the next time it
+    // checks on it, which can take ten seconds
+    assert(sentinel_failover())
+    let demoted = false
+    let attempt: uint = 0
+    while attempt++ < 300 {
+        if is_replica(old_port) {
+            demoted = true
+            break
+        }
+        time.sleep_ms(100)
+    }
+    assert(demoted)
+
+    // An idle connection still leads to the old primary: its command fails, and giving it back
+    // empties the pool
+    let stale = pool.get() ! { println(E.message) assert(false) return }
+    assert(stale.config.port == old_port)
+    let failed = false
+    stale.set("pool:failover", "lost") ! { failed = true }
+    assert(failed)
+    pool.put(stale)
+    assert(pool.size == 0)
+
+    // The next one asks the sentinels again
+    let fresh = pool.get() ! { println(E.message) assert(false) return }
+    assert(fresh.config.port != old_port)
+    fresh.set("pool:failover", "after") ! { println(E.message) assert(false) return }
+    fresh.del("pool:failover") _
+    pool.put(fresh)
+    assert(pool.size == 1)
+}

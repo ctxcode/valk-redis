@@ -33,6 +33,8 @@ use valk.time
     /// Whether `get` checks an idle connection with a `PING` before handing it out, which costs
     /// a round trip and catches a connection the server closed in the meantime.
     + check_on_get: bool (false)
+    /// Where the sentinels are, for a pool made with `from_sentinel`; null for a fixed server.
+    ~ sentinel: ?SentinelConfig (null)
     idle: Array[Connection] (.{})
     /// How many connections the pool has: idle plus handed out.
     ~ size: uint (0)
@@ -43,6 +45,37 @@ use valk.time
     + static fn new(config: Config, max_connections: uint (16), max_idle: uint (8)) Pool {
         return Pool {
             config: config
+            max_connections: max_connections
+            max_idle: max_idle
+        }
+    }
+
+    /// Creates a pool whose connections go to the primary the sentinels name, and that follows
+    /// a failover.
+    ///
+    /// Every new connection asks the sentinels, as `connect_sentinel` does. A connection that
+    /// was dropped, or whose server refused a write with `READONLY` because it became a
+    /// replica, is closed when it is given back, and so is every idle one, since they lead to
+    /// the same server. The next `get` connects to the new primary. The command that met the
+    /// failover still throws: retry it if it is safe to.
+    ///
+    /// ```valk
+    /// global cache: redis.Pool (redis.Pool.from_sentinel(redis.SentinelConfig {
+    ///     sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379" }
+    ///     master_name: "cache"
+    /// }, 16))
+    /// ```
+    + static fn from_sentinel(sentinel: SentinelConfig, max_connections: uint (16), max_idle: uint (8)) Pool {
+        return Pool {
+            config: Config {
+                password: sentinel.password
+                username: sentinel.username
+                db: sentinel.db
+                timeout_ms: sentinel.timeout_ms
+                protocol: sentinel.protocol
+                tls: sentinel.tls
+            }
+            sentinel: sentinel
             max_connections: max_connections
             max_idle: max_idle
         }
@@ -75,7 +108,7 @@ use valk.time
             if this.max_connections == 0 || this.size < this.max_connections {
                 // Count it before connecting, so that concurrent coroutines do not all open one
                 this.size++
-                let con = connect_with(this.config) ! {
+                let con = this.open() ! {
                     this.drop()
                     throw E
                 }
@@ -97,6 +130,14 @@ use valk.time
     /// kept, so that what comes out of `get` is always a connection ready for a command.
     + fn put(con: Connection) {
         if this.in_use > 0 : this.in_use--
+        // Behind sentinels a dropped connection or a `READONLY` means a failover: the server
+        // was demoted and closes its clients, and the idle connections lead there too
+        if isset(this.sentinel) && (con.closed || con.saw_readonly) {
+            con.close()
+            this.drop()
+            this.close_idle()
+            return
+        }
         if con.closed {
             this.drop()
             return
@@ -117,6 +158,12 @@ use valk.time
             this.drop()
         }
         this.idle.clear()
+    }
+
+    fn open() Connection !Error {
+        let sentinel = this.sentinel
+        if isset(sentinel) : return connect_sentinel(sentinel) !>
+        return connect_with(this.config) !>
     }
 
     fn drop() {
