@@ -100,12 +100,8 @@ let con = redis.connect_sentinel(redis.SentinelConfig {
 }) ! panic("%{E.message}")
 ```
 
-A pool opens its connections the same way, so a failover reaches the whole program:
-
-```valk
-global pool: redis.Pool (redis.Pool.new(redis.Config {}, 8))
-// ... or open each connection with connect_sentinel in your own opener
-```
+A pool made with `Pool.from_sentinel` opens its connections this way, and follows a
+failover.
 
 ### connect_url
 
@@ -203,6 +199,8 @@ The ACL user name, or "" to log in with the password alone.
     + debug: bool
     // The protocol version in use: 2 or 3.
     ~ protocol: uint
+    // Whether the server refused a write with `READONLY`: it is a replica now, as a primary becomes one after a failover. A pool made with `Pool.from_sentinel` drops it.
+    ~ saw_readonly: bool
     // Server properties reported by `HELLO`, such as `version` and `role`. Empty on RESP2.
     ~ server_info: Map[String]
     // How many channels and patterns this connection is subscribed to.
@@ -531,6 +529,11 @@ Prints every command and reply when true.
 #### protocol
 
 The protocol version in use: 2 or 3.
+
+#### saw_readonly
+
+Whether the server refused a write with `READONLY`: it is a replica now, as a primary
+becomes one after a failover. A pool made with `Pool.from_sentinel` drops it.
 
 #### server_info
 
@@ -1390,6 +1393,8 @@ that one failure does not hide the replies of the others.
     + max_connections: uint
     // How many idle connections are kept. Connections given back beyond this are closed.
     + max_idle: uint
+    // Where the sentinels are, for a pool made with `from_sentinel`; null for a fixed server.
+    ~ sentinel: ?SentinelConfig
     // How many connections the pool has: idle plus handed out.
     ~ size: uint
     // How long `get` waits for a connection to come back when the pool is at its limit, in milliseconds. It throws `timeout` after that; 0 waits forever.
@@ -1397,6 +1402,8 @@ that one failure does not hide the replies of the others.
 
     // Closes every idle connection. Connections that are handed out are left alone and close when they are given back.
     + fn close_idle() void
+    // Creates a pool whose connections go to the primary the sentinels name, and that follows a failover.
+    + static fn from_sentinel(sentinel: SentinelConfig, max_connections: uint (16), max_idle: uint (8)) Pool
     // Takes a connection out of the pool, opening one when none is idle.
     + fn get() Connection !Error
     // Creates a pool. No connection is opened until the first `get`.
@@ -1450,6 +1457,10 @@ together. 0 is no limit.
 
 How many idle connections are kept. Connections given back beyond this are closed.
 
+#### sentinel
+
+Where the sentinels are, for a pool made with `from_sentinel`; null for a fixed server.
+
 #### size
 
 How many connections the pool has: idle plus handed out.
@@ -1463,6 +1474,24 @@ milliseconds. It throws `timeout` after that; 0 waits forever.
 
 Closes every idle connection. Connections that are handed out are left alone and close
 when they are given back.
+
+#### from_sentinel
+
+Creates a pool whose connections go to the primary the sentinels name, and that follows
+a failover.
+
+Every new connection asks the sentinels, as `connect_sentinel` does. A connection that
+was dropped, or whose server refused a write with `READONLY` because it became a
+replica, is closed when it is given back, and so is every idle one, since they lead to
+the same server. The next `get` connects to the new primary. The command that met the
+failover still throws: retry it if it is safe to.
+
+```valk
+global cache: redis.Pool (redis.Pool.from_sentinel(redis.SentinelConfig {
+    sentinels: .{ "10.0.0.1:26379", "10.0.0.2:26379" }
+    master_name: "cache"
+}, 16))
+```
 
 #### get
 

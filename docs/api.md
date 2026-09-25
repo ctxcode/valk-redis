@@ -75,6 +75,8 @@ Namespaces: [main](#main)
     + debug: bool
     // The protocol version in use: 2 or 3.
     ~ protocol: uint
+    // Whether the server refused a write with `READONLY`: it is a replica now, as a primary becomes one after a failover. A pool made with `Pool.from_sentinel` drops it.
+    ~ saw_readonly: bool
     // Server properties reported by `HELLO`, such as `version` and `role`. Empty on RESP2.
     ~ server_info: Map[String]
     // How many channels and patterns this connection is subscribed to.
@@ -433,6 +435,8 @@ Namespaces: [main](#main)
     + max_connections: uint
     // How many idle connections are kept. Connections given back beyond this are closed.
     + max_idle: uint
+    // Where the sentinels are, for a pool made with `from_sentinel`; null for a fixed server.
+    ~ sentinel: ?SentinelConfig
     // How many connections the pool has: idle plus handed out.
     ~ size: uint
     // How long `get` waits for a connection to come back when the pool is at its limit, in milliseconds. It throws `timeout` after that; 0 waits forever.
@@ -440,6 +444,8 @@ Namespaces: [main](#main)
 
     // Closes every idle connection. Connections that are handed out are left alone and close when they are given back.
     + fn close_idle() void
+    // Creates a pool whose connections go to the primary the sentinels name, and that follows a failover.
+    + static fn from_sentinel(sentinel: SentinelConfig, max_connections: uint (16), max_idle: uint (8)) Pool
     // Takes a connection out of the pool, opening one when none is idle.
     + fn get() Connection !Error
     // Creates a pool. No connection is opened until the first `get`.
