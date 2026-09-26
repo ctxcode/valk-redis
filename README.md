@@ -322,7 +322,5 @@ Override the compiler with `make vc=/path/to/valk test`.
 ## Not supported
 
 Cluster mode (`MOVED` and `ASK` redirects across nodes) is not implemented: a connection talks to
-one server. Sentinel is, see above. A cluster answer is not passed through as a raw reply, though:
-it throws `cluster`, with `error_code` set to the word the server used and a message saying
-which node the key belongs to, or why the command cannot run as written. So a cluster is
-diagnosed in one line rather than as a puzzling `MOVED 3999 10.0.0.2:6381`.
+one server. Sentinel is, see above. A cluster answer throws `cluster`, with `error_code` set to
+the word the server used and a message saying which node the key belongs to.
