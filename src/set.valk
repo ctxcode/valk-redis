@@ -1,4 +1,4 @@
-extend Connection {
+trait SetCommands {
 
     /// Adds a member to a set and returns whether it is new.
     + fn sadd(key: String, member: String) bool !Error {

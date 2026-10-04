@@ -1,4 +1,4 @@
-extend Connection {
+trait HashCommands {
 
     /// Returns one field of a hash, or null when the field or the key does not exist.
     + fn hget(key: String, field: String) ?String !Error {

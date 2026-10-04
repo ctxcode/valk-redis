@@ -133,6 +133,58 @@ global cache: redis.Pool (redis.Pool.from_sentinel(redis.SentinelConfig {
 
 A pool made with `Pool.new` connects to the fixed address of its `Config`.
 
+## Cluster
+
+`connect_cluster` asks the first node that answers where the 16384 slots are, keeps a pool per
+node, and sends every command to the node of its key. It has the same command methods as a
+connection:
+
+```rust
+let cluster = redis.connect_cluster(redis.ClusterConfig {
+    nodes: .{ "10.0.0.1:6379", "10.0.0.2:6379" }
+    password: "secret"
+    tls: .{}                         // the same login and TLS settings as a connection
+}) ! panic("%{E.message}")
+
+cluster.set("user:1", "Ada") ! panic("%{E.message}")
+let name = cluster.get("user:1") ! panic("%{E.message}")
+
+// The keys of one command share a slot: give them the same hash tag
+cluster.mset(.{ "{user:1}:name" => "Ada", "{user:1}:role" => "admin" }) ! panic("%{E.message}")
+```
+
+Keys in different slots throw `cluster` with `CROSSSLOT` before anything is sent. A slot that
+moved is followed (`MOVED` reads the new owner, `ASK` sends `ASKING` for that one command), and a
+lost connection, `TRYAGAIN` or `CLUSTERDOWN` is retried up to `max_retries` times with a
+doubling wait, which is how a failover is ridden out. A command that is retried after a lost
+connection may have run already. `read_from_replicas: true` sends commands that only read to
+the replicas.
+
+A pipeline sends the commands of every node in one go and returns the replies in order:
+
+```rust
+let pipe = cluster.pipeline()
+pipe.add(.{ "SET", "a", 1 })
+pipe.add(.{ "SET", "b", 2 })
+let replies = pipe.exec() ! panic("%{E.message}")
+```
+
+A transaction, a blocking command or a subscription needs one connection: `connection_for`
+takes one to the primary of a key, and `put` gives it back. The keys of a transaction share the
+slot of that key.
+
+```rust
+let con = cluster.connection_for("{user:1}") ! panic("%{E.message}")
+defer cluster.put(con)
+con.multi() ! panic("%{E.message}")
+con.queue(.{ "INCR", "{user:1}:visits" }) ! panic("%{E.message}")
+con.exec() ! panic("%{E.message}")
+```
+
+`keys`, `dbsize`, `scan_iter`, `flushdb` and `script_load` cover every primary, and
+`run_on_primaries` runs any command on each of them. A cluster client belongs to one thread,
+like a pool; the coroutines of that thread can share it.
+
 ## Pools
 
 A `Pool` opens connections as they are needed and hands them out again afterwards. It belongs
@@ -301,7 +353,7 @@ Every method throws `redis.Error`:
 | `tls` | the TLS handshake failed, or its settings could not be used |
 | `auth` | the credentials were rejected, or none were given where they are needed |
 | `server` | the server answered with an error; `error_code` holds its first word |
-| `cluster` | the server is in a cluster and the command belongs to another node, or the cluster is not serving it |
+| `cluster` | the keys of a command are in different slots, a redirect or retry was given up on, or a `Connection` met a cluster answer |
 | `protocol` | the server sent bytes this package did not expect |
 | `timeout` | a read ran past the connection timeout |
 | `closed` | the connection is closed |
@@ -310,9 +362,10 @@ Every method throws `redis.Error`:
 
 `make server` starts the Redis servers in docker: a plain one on 6399, one that only accepts TLS
 on 6400 with a self-signed certificate it generates, one on 6404 that also wants a client
-certificate signed by a test CA it generates, and a primary on 6401 with a replica on 6402
-and a sentinel on 6403 watching them. `make server-down` removes them again. `make test` runs the
-suite against all of it, using database 9.
+certificate signed by a test CA it generates, a primary on 6401 with a replica on 6402 and a
+sentinel on 6403 watching them, and a cluster of three primaries with a replica each on
+7101-7106. `make server-down` removes them again. `make test` runs the suite against all of
+it, using database 9 outside the cluster.
 
 `REDIS_FAILOVER_TEST=1 make test` also stops the primary and waits for the sentinel to promote
 the replica, which takes a few seconds; it puts the node back afterwards. `make example` builds and runs the
@@ -321,6 +374,9 @@ Override the compiler with `make vc=/path/to/valk test`.
 
 ## Not supported
 
-Cluster mode (`MOVED` and `ASK` redirects across nodes) is not implemented: a connection talks to
-one server. Sentinel is, see above. A cluster answer throws `cluster`, with `error_code` set to
-the word the server used and a message saying which node the key belongs to.
+- A `Connection` talks to one server and does not follow cluster redirects; it throws `cluster`
+  with the word the server used in `error_code`. Use `connect_cluster` for a cluster.
+- On a cluster: `MULTI`, `WATCH` and subscriptions only through `connection_for`, so a
+  transaction cannot span slots; sharded pub/sub (`SSUBSCRIBE`) has no methods of its own;
+  `SELECT` does not exist there; and a command with keys in other places than this package
+  knows (most module commands) is routed by its first argument.

@@ -1,4 +1,4 @@
-extend Connection {
+trait KeyCommands {
 
     //
     // Keys
@@ -65,22 +65,6 @@ extend Connection {
     + fn type_of(key: String) String !Error {
         return (this.run(.{ "TYPE", key }) !>).to_string()
     }
-    /// Returns every key matching a glob pattern such as `user:*`.
-    ///
-    /// This walks the whole keyspace and blocks the server while it does; use `scan_iter` on a
-    /// database that is in use.
-    + fn keys(pattern: String ("*")) Array[String] !Error {
-        return (this.run(.{ "KEYS", pattern }) !>).to_strings()
-    }
-    /// Returns a random key, or null when the database is empty.
-    + fn random_key() ?String !Error {
-        return (this.run(.{ "RANDOMKEY" }) !>).to_string_or_null()
-    }
-    /// Returns how many keys the selected database holds.
-    + fn dbsize() uint !Error {
-        return (this.run(.{ "DBSIZE" }) !>).to_uint()
-    }
-
     //
     // Strings
     //
@@ -168,6 +152,25 @@ extend Connection {
     /// Takes `amount` off a number held at a key and returns the result.
     + fn decr_by(key: String, amount: int) int !Error {
         return (this.run(.{ "DECRBY", key, amount }) !>).to_int()
+    }
+}
+
+extend Connection {
+
+    /// Returns every key matching a glob pattern such as `user:*`.
+    ///
+    /// This walks the whole keyspace and blocks the server while it does; use `scan_iter` on a
+    /// database that is in use.
+    + fn keys(pattern: String ("*")) Array[String] !Error {
+        return (this.run(.{ "KEYS", pattern }) !>).to_strings()
+    }
+    /// Returns a random key, or null when the database is empty.
+    + fn random_key() ?String !Error {
+        return (this.run(.{ "RANDOMKEY" }) !>).to_string_or_null()
+    }
+    /// Returns how many keys the selected database holds.
+    + fn dbsize() uint !Error {
+        return (this.run(.{ "DBSIZE" }) !>).to_uint()
     }
 
     //

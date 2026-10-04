@@ -1,4 +1,4 @@
-extend Connection {
+trait ListCommands {
 
     /// Adds a value at the head of a list and returns its new length.
     + fn lpush(key: String, value: String) uint !Error {

@@ -7,6 +7,13 @@ Namespaces: [main](#main)
 
 # main
 
+## Aliases for 'main'
+
+```js
+// The number of hash slots a Redis cluster divides its keys over.
++ value SLOT_COUNT (16384)
+```
+
 ## Errors for 'main'
 
 ```js
@@ -28,17 +35,346 @@ Namespaces: [main](#main)
 + fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
+// Connects to a Redis Cluster: asks the first node that answers where the slots are.
++ fn connect_cluster(config: ClusterConfig) Cluster !Error
 // Asks the sentinels where the primary is, and connects to it.
 + fn connect_sentinel(config: SentinelConfig) Connection !Error
 // Opens a connection described by a URL.
 + fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
 // Opens a connection described by a `Config` and logs in.
 + fn connect_with(config: Config) Connection !Error
+// Returns the cluster hash slot of a key: CRC16 of the key modulo 16384.
++ fn key_slot(key: String) uint
 // Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
 + fn sentinel_replicas(config: SentinelConfig) Array[String] !Error
 ```
 
 ## Classes for 'main'
+
+```js
+// A `Connection` or a `Cluster`: something that runs commands.
++ interface Client {
+    // Runs one command and returns its reply; an error reply throws `server`.
+    + fn run(args: Array[String]) Value !Error
+}
+```
+
+```js
+// A client for a Redis Cluster.
++ class Cluster is Client {
+    // The settings this client was made with.
+    + config: ClusterConfig
+    // How many times the slot map was read from the cluster.
+    ~ refreshes: uint
+
+    // Appends to a key and returns the new length.
+    + fn append(key: String, value: String) uint !Error
+    // Waits for a value at the head of a list and takes it off.
+    + fn blpop(key: String, timeout_seconds: uint (0)) ?String !Error
+    // Waits for a value at the head of any of `keys`, in the order given.
+    + fn blpop_many(keys: Array[String], timeout_seconds: uint (0)) ?Array[String] !Error
+    // Waits for a value at the tail of a list and takes it off.
+    + fn brpop(key: String, timeout_seconds: uint (0)) ?String !Error
+    // Waits for a value at the tail of any of `keys`, in the order given.
+    + fn brpop_many(keys: Array[String], timeout_seconds: uint (0)) ?Array[String] !Error
+    // Closes the idle connections to every node. Connections that are handed out close when they come back.
+    + fn close() void
+    // Takes a connection to the primary of `key` out of its pool, for what needs one connection for several commands: a transaction, a blocking command or a subscription. Give it back with `put`.
+    + fn connection_for(key: String) Connection !Error
+    // Returns how many keys the cluster holds.
+    + fn dbsize() uint !Error
+    // Takes 1 off a number held at a key and returns the result.
+    + fn decr(key: String) int !Error
+    // Takes `amount` off a number held at a key and returns the result.
+    + fn decr_by(key: String, amount: int) int !Error
+    // Removes a key and returns whether it existed.
+    + fn del(key: String) bool !Error
+    // Removes several keys and returns how many existed.
+    + fn del_many(keys: Array[String]) uint !Error
+    // Runs a Lua script on the server and returns its reply.
+    + fn eval(source: String, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
+    // Runs a script the server already has, by its SHA-1. Throws `server` with the code `NOSCRIPT` when it does not have it.
+    + fn evalsha(sha: String, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
+    // Returns whether a key exists.
+    + fn exists(key: String) bool !Error
+    // Returns how many of `keys` exist. A key present several times counts each time.
+    + fn exists_many(keys: Array[String]) uint !Error
+    // Gives a key a lifetime in seconds and returns whether it was set.
+    + fn expire(key: String, seconds: uint) bool !Error
+    // Makes a key expire at a Unix time in seconds.
+    + fn expire_at(key: String, unix_seconds: uint) bool !Error
+    // Removes every key from every primary; a cluster has one database, so this is `flushdb`.
+    + fn flushall() void !Error
+    // Removes every key from every primary.
+    + fn flushdb() void !Error
+    // Returns the value of a key, or null when it does not exist.
+    + fn get(key: String) ?String !Error
+    // Returns a key and deletes it. Needs Redis 6.2 or newer.
+    + fn getdel(key: String) ?String !Error
+    // Sets a key and returns what it held before.
+    + fn getset(key: String, value: String) ?String !Error
+    // Removes one field of a hash and returns whether it existed.
+    + fn hdel(key: String, field: String) bool !Error
+    // Removes several fields of a hash and returns how many existed.
+    + fn hdel_many(key: String, fields: Array[String]) uint !Error
+    // Returns whether a hash has a field.
+    + fn hexists(key: String, field: String) bool !Error
+    // Returns one field of a hash, or null when the field or the key does not exist.
+    + fn hget(key: String, field: String) ?String !Error
+    // Returns every field of a hash with its value, or an empty map when the key does not exist.
+    + fn hgetall(key: String) Map[String] !Error
+    // Adds `amount` to a number held in a field and returns the result.
+    + fn hincr_by(key: String, field: String, amount: int) int !Error
+    // Adds a floating point `amount` to a number held in a field and returns the result.
+    + fn hincr_by_float(key: String, field: String, amount: float) float !Error
+    // Returns the field names of a hash.
+    + fn hkeys(key: String) Array[String] !Error
+    // Returns how many fields a hash has.
+    + fn hlen(key: String) uint !Error
+    // Returns the values of several fields; a field that does not exist becomes null.
+    + fn hmget(key: String, fields: Array[String]) Array[?String] !Error
+    // Reads one page of a hash, as fields with their values.
+    + fn hscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Map[String]) !Error
+    // Sets one field of a hash and returns whether the field is new.
+    + fn hset(key: String, field: String, value: String) bool !Error
+    // Sets several fields of a hash and returns how many of them are new.
+    + fn hset_many(key: String, values: Map[String]) uint !Error
+    // Sets one field of a hash only when it does not exist yet.
+    + fn hsetnx(key: String, field: String, value: String) bool !Error
+    // Returns the values of a hash.
+    + fn hvals(key: String) Array[String] !Error
+    // Adds 1 to a number held at a key and returns the result. A missing key counts as 0.
+    + fn incr(key: String) int !Error
+    // Adds `amount` to a number held at a key and returns the result.
+    + fn incr_by(key: String, amount: int) int !Error
+    // Adds a floating point `amount` to a number held at a key and returns the result.
+    + fn incr_by_float(key: String, amount: float) float !Error
+    // Returns every key matching a glob pattern, from every primary.
+    + fn keys(pattern: String ("*")) Array[String] !Error
+    // Returns the value at an offset of a list, or null when the offset lies outside it.
+    + fn lindex(key: String, index: int) ?String !Error
+    // Returns how many values a list holds.
+    + fn llen(key: String) uint !Error
+    // Takes the first value off a list, or null when it is empty.
+    + fn lpop(key: String) ?String !Error
+    // Adds a value at the head of a list and returns its new length.
+    + fn lpush(key: String, value: String) uint !Error
+    // Adds several values at the head of a list, the last one ending up first.
+    + fn lpush_many(key: String, values: Array[String]) uint !Error
+    // Returns the values of a list between two offsets. Negative offsets count from the end, so `lrange(key, 0, -1)` is the whole list.
+    + fn lrange(key: String, start: int (0), stop: int (-1)) Array[String] !Error
+    // Removes values equal to `value` and returns how many were removed.
+    + fn lrem(key: String, value: String, count: int (0)) uint !Error
+    // Writes the value at an offset of a list. Throws `server` when the offset lies outside it.
+    + fn lset(key: String, index: int, value: String) void !Error
+    // Keeps only the values between two offsets and removes the rest.
+    + fn ltrim(key: String, start: int, stop: int) void !Error
+    // Returns the values of several keys at once; a key that does not exist becomes null.
+    + fn mget(keys: Array[String]) Array[?String] !Error
+    // Sets several keys at once.
+    + fn mset(values: Map[String]) void !Error
+    // Removes the lifetime of a key, so that it stays until it is deleted.
+    + fn persist(key: String) bool !Error
+    // Gives a key a lifetime in milliseconds and returns whether it was set.
+    + fn pexpire(key: String, milliseconds: uint) bool !Error
+    // Sends `PING` to every primary and returns whether all of them answered.
+    + fn ping() bool
+    // Starts a pipeline: commands are sent per node in one go.
+    + fn pipeline() ClusterPipeline
+    // Returns the addresses of the primaries, as `host:port`.
+    + fn primaries() Array[String]
+    // Returns the address of the primary that serves the slot of `key`, as `host:port`.
+    + fn primary_for(key: String) String !Error
+    // Returns the milliseconds a key still has to live, -1 when it has no lifetime and -2 when it does not exist.
+    + fn pttl(key: String) int !Error
+    // Publishes a message and returns how many subscribers the server handed it to.
+    + fn publish(channel: String, message: String) uint !Error
+    // Gives back a connection from `connection_for`.
+    + fn put(con: Connection) void
+    // Reads which node serves which slot from the cluster again.
+    + fn refresh() void !Error
+    // Renames a key. Throws `server` when the key does not exist.
+    + fn rename(key: String, to: String) void !Error
+    // Renames a key when the new name is free, and returns whether it was renamed.
+    + fn rename_nx(key: String, to: String) bool !Error
+    // Takes the last value off a list, or null when it is empty.
+    + fn rpop(key: String) ?String !Error
+    // Takes the last value off one list and puts it at the head of another.
+    + fn rpoplpush(key: String, to: String) ?String !Error
+    // Adds a value at the tail of a list and returns its new length.
+    + fn rpush(key: String, value: String) uint !Error
+    // Adds several values at the tail of a list, in order.
+    + fn rpush_many(key: String, values: Array[String]) uint !Error
+    // Runs one command on the node of its key and returns the reply.
+    + fn run(args: Array[String]) Value !Error
+    // Runs a command on every primary and returns their replies, in the order of `primaries`.
+    + fn run_on_primaries(args: Array[String]) Array[Value] !Error
+    // The same as `run`, but an error reply is returned as a `Value` of type `error` instead of thrown.
+    + fn run_raw(args: Array[String]) Value !Error
+    // Adds a member to a set and returns whether it is new.
+    + fn sadd(key: String, member: String) bool !Error
+    // Adds several members to a set and returns how many are new.
+    + fn sadd_many(key: String, members: Array[String]) uint !Error
+    // Walks every key of the cluster, one primary after the other.
+    + fn scan_iter(pattern: String (""), count: uint (0)) ScanIterator
+    // Returns how many members a set has.
+    + fn scard(key: String) uint !Error
+    // Stores a script on every primary and returns its SHA-1.
+    + fn script_load(source: String) String !Error
+    // Returns the members of the first key that the other keys do not hold.
+    + fn sdiff(keys: Array[String]) Array[String] !Error
+    // Stores the difference of `keys` in `to` and returns how many members there are.
+    + fn sdiffstore(to: String, keys: Array[String]) uint !Error
+    // Sets the value of a key and returns whether it was written.
+    + fn set(key: String, value: String, expire_seconds: uint (0), expire_ms: uint (0), if_not_exists: bool (false), if_exists: bool (false), keep_ttl: bool (false)) bool !Error
+    // Sets a key with a lifetime in seconds.
+    + fn setex(key: String, value: String, seconds: uint) void !Error
+    // Sets a key only when it does not exist yet, and returns whether it was written.
+    + fn setnx(key: String, value: String) bool !Error
+    // Returns the members that every one of `keys` holds.
+    + fn sinter(keys: Array[String]) Array[String] !Error
+    // Stores the members that every one of `keys` holds in `to` and returns how many there are.
+    + fn sinterstore(to: String, keys: Array[String]) uint !Error
+    // Returns whether a set holds a member.
+    + fn sismember(key: String, member: String) bool !Error
+    // Returns every member of a set, in no particular order.
+    + fn smembers(key: String) Array[String] !Error
+    // Moves a member from one set to another and returns whether it was there.
+    + fn smove(key: String, to: String, member: String) bool !Error
+    // Takes a random member off a set, or null when it is empty.
+    + fn spop(key: String) ?String !Error
+    // Returns a random member without removing it, or null when the set is empty.
+    + fn srandmember(key: String) ?String !Error
+    // Returns `count` random members without removing them. A negative `count` may return the same member several times.
+    + fn srandmembers(key: String, count: int) Array[String] !Error
+    // Removes a member from a set and returns whether it was there.
+    + fn srem(key: String, member: String) bool !Error
+    // Removes several members from a set and returns how many were there.
+    + fn srem_many(key: String, members: Array[String]) uint !Error
+    // Reads one page of a set.
+    + fn sscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[String]) !Error
+    // Walks every member of a set, a page at a time.
+    + fn sscan_iter(key: String, pattern: String (""), count: uint (0)) ScanIterator
+    // Returns the length of the value of a key, or 0 when it does not exist.
+    + fn strlen(key: String) uint !Error
+    // Returns the members of all of `keys` together.
+    + fn sunion(keys: Array[String]) Array[String] !Error
+    // Stores the members of all of `keys` in `to` and returns how many there are.
+    + fn sunionstore(to: String, keys: Array[String]) uint !Error
+    // Returns the seconds a key still has to live, -1 when it has no lifetime and -2 when it does not exist.
+    + fn ttl(key: String) int !Error
+    // Returns the type of a key: `string`, `list`, `set`, `zset`, `hash`, `stream`, or `none` when it does not exist.
+    + fn type_of(key: String) String !Error
+    // Acknowledges entries, so that the group stops counting them as pending.
+    + fn xack(key: String, group: String, ids: Array[String]) uint !Error
+    // Adds an entry to a stream and returns its id.
+    + fn xadd(key: String, fields: Map[String], id: String ("*"), maxlen: uint (0), approximate: bool (true)) String !Error
+    // Takes pending entries over for another consumer, when the one that holds them has not acknowledged them for `min_idle_ms`.
+    + fn xclaim(key: String, group: String, consumer: String, min_idle_ms: uint, ids: Array[String]) Array[StreamEntry] !Error
+    // Removes an entry and returns whether it was there.
+    + fn xdel(key: String, id: String) bool !Error
+    // Creates a consumer group on a stream.
+    + fn xgroup_create(key: String, group: String, id: String ("$"), create_stream: bool (true)) bool !Error
+    // Removes a consumer group and returns whether it was there.
+    + fn xgroup_destroy(key: String, group: String) bool !Error
+    // Returns how many entries a stream holds.
+    + fn xlen(key: String) uint !Error
+    // Returns what a group still owes: how many entries are pending, and who holds them.
+    + fn xpending(key: String, group: String) PendingSummary !Error
+    // Returns the entries between two ids, oldest first.
+    + fn xrange(key: String, start: String ("-"), end: String ("+"), count: uint (0)) Array[StreamEntry] !Error
+    // Reads entries added after the ids given, from one or more streams.
+    + fn xread(streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false)) Array[StreamEntries] !Error
+    // Reads entries for one consumer of a group.
+    + fn xreadgroup(group: String, consumer: String, streams: Map[String], count: uint (0), block_ms: uint (0), block: bool (false), no_ack: bool (false)) Array[StreamEntries] !Error
+    // Returns the entries between two ids, newest first. `start` is the higher id here.
+    + fn xrevrange(key: String, start: String ("+"), end: String ("-"), count: uint (0)) Array[StreamEntry] !Error
+    // Trims a stream to `maxlen` entries and returns how many were removed.
+    + fn xtrim(key: String, maxlen: uint, approximate: bool (true)) uint !Error
+    // Adds a member to a sorted set, or changes its score, and returns whether it is new.
+    + fn zadd(key: String, score: float, member: String) bool !Error
+    // Adds several members with their scores and returns how many are new.
+    + fn zadd_many(key: String, members: Map[float]) uint !Error
+    // Returns how many members a sorted set has.
+    + fn zcard(key: String) uint !Error
+    // Returns how many members have a score between `min` and `max`.
+    + fn zcount(key: String, min: String ("-inf"), max: String ("+inf")) uint !Error
+    // Adds `amount` to the score of a member and returns its new score.
+    + fn zincr_by(key: String, amount: float, member: String) float !Error
+    // Takes the member with the highest score off the set, or null when it is empty.
+    + fn zpopmax(key: String) ?ScoredMember !Error
+    // Takes the member with the lowest score off the set, or null when it is empty.
+    + fn zpopmin(key: String) ?ScoredMember !Error
+    // Returns the members between two positions, lowest score first.
+    + fn zrange(key: String, start: int (0), stop: int (-1), reverse: bool (false)) Array[String] !Error
+    // Returns the members with a score between `min` and `max`, lowest score first.
+    + fn zrange_by_score(key: String, min: String ("-inf"), max: String ("+inf"), offset: uint (0), count: uint (0)) Array[String] !Error
+    // The same as `zrange_by_score`, with the score of every member.
+    + fn zrange_by_score_with_scores(key: String, min: String ("-inf"), max: String ("+inf"), offset: uint (0), count: uint (0)) Array[ScoredMember] !Error
+    // The same as `zrange`, with the score of every member.
+    + fn zrange_with_scores(key: String, start: int (0), stop: int (-1), reverse: bool (false)) Array[ScoredMember] !Error
+    // Returns the position of a member, counted from the lowest score, or null when it is not in the set.
+    + fn zrank(key: String, member: String) ?uint !Error
+    // Removes a member and returns whether it was there.
+    + fn zrem(key: String, member: String) bool !Error
+    // Removes the members between two positions and returns how many were removed.
+    + fn zrem_by_rank(key: String, start: int, stop: int) uint !Error
+    // Removes the members with a score between `min` and `max` and returns how many were removed.
+    + fn zrem_by_score(key: String, min: String ("-inf"), max: String ("+inf")) uint !Error
+    // Removes several members and returns how many were there.
+    + fn zrem_many(key: String, members: Array[String]) uint !Error
+    // Returns the position of a member, counted from the highest score.
+    + fn zrevrank(key: String, member: String) ?uint !Error
+    // Reads one page of a sorted set, as members with their scores.
+    + fn zscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[ScoredMember]) !Error
+    // Returns the score of a member, or null when it is not in the set.
+    + fn zscore(key: String, member: String) ?float !Error
+}
+```
+
+```js
+// Where to find a Redis Cluster, and how to talk to its nodes.
++ class ClusterConfig {
+    // The greatest number of connections to one node. 0 is no limit.
+    + max_connections: uint
+    // How many idle connections are kept per node.
+    + max_idle: uint
+    // How many `MOVED` and `ASK` redirects one command may follow.
+    + max_redirects: uint
+    // How many times a command is sent again after a lost connection, `TRYAGAIN` or `CLUSTERDOWN`.
+    + max_retries: uint
+    // Some nodes of the cluster, as `host:port`. One that answers is enough: it tells where the others are.
+    + nodes: Array[String]
+    // The password, or "" for a cluster without one.
+    + password: String
+    // The protocol to speak: 2 or 3.
+    + protocol: uint
+    // Whether commands that only read go to the replicas of a slot, which may be a moment behind their primary.
+    + read_from_replicas: bool
+    // The wait before the first retry in milliseconds; it doubles with every retry, up to a second.
+    + retry_delay_ms: uint
+    // How long connecting to a node may take, in milliseconds.
+    + timeout_ms: uint
+    // TLS settings, or null for connections without TLS.
+    + tls: ?TlsOptions
+    // The ACL user name, or "" to log in with the password alone.
+    + username: String
+}
+```
+
+```js
+// Commands for a cluster, sent in one go per node.
++ class ClusterPipeline {
+    // Adds a command. Nothing is sent until `exec`.
+    + fn add(args: Array[String]) ClusterPipeline
+    // Throws away the commands that were added but not sent.
+    + fn clear() void
+    // How many commands are waiting to be sent.
+    + get count: uint
+    // Sends every command and returns their replies in order.
+    + fn exec() Array[Value] !Error
+}
+```
 
 ```js
 // Everything needed to open a connection.
@@ -64,7 +400,7 @@ Namespaces: [main](#main)
 
 ```js
 // A connection to one server.
-+ class Connection {
++ class Connection is Client {
     // Whether `close` was called, or the server closed the connection.
     ~ closed: bool
     // The settings this connection was opened with.
@@ -486,7 +822,7 @@ Namespaces: [main](#main)
     // Creates a script. Nothing is sent to a server until it runs.
     + static fn new(source: String) Script
     // Runs the script and returns its reply.
-    + fn run(con: Connection, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
+    + fn run(con: Client, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error
 }
 ```
 

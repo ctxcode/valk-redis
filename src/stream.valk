@@ -26,7 +26,7 @@
     + consumers: Map[uint] (.{})
 }
 
-extend Connection {
+trait StreamCommands {
 
     /// Adds an entry to a stream and returns its id.
     ///

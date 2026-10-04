@@ -1,0 +1,164 @@
+/// The number of hash slots a Redis cluster divides its keys over.
++ value SLOT_COUNT (16384)
+
+/// Returns the cluster hash slot of a key: CRC16 of the key modulo 16384.
+///
+/// When the key holds a `{...}` with something in between, only that part is hashed, so
+/// `{user:1}:name` and `{user:1}:mail` share a slot and can be used in one command.
++ fn key_slot(key: String) uint {
+    let start: uint = 0
+    let length = key.length
+    let open = key.index_of_byte('{') !? key.length
+    if open < key.length {
+        let close = key.index_of_byte('}', open + 1) !? key.length
+        if close < key.length && close > open + 1 {
+            start = open + 1
+            length = close - start
+        }
+    }
+    let table = CRC16_TABLE
+    let crc: uint = 0
+    let i = start
+    let end = start + length
+    while i < end {
+        crc = ((crc << 8) ^ (table.get(((crc >> 8) ^ key[i]) & 0xff) !? 0)) & 0xffff
+        i++
+    }
+    return crc % SLOT_COUNT
+}
+
+// CRC16-CCITT (XMODEM), the variant Redis Cluster uses
+global CRC16_TABLE: Array[uint] (crc16_table())
+
+fn crc16_table() Array[uint] {
+    let table = Array[uint].new(256)
+    let i: uint = 0
+    while i < 256 {
+        let crc = i << 8
+        let bit: uint = 0
+        while bit++ < 8 {
+            crc = (crc & 0x8000) != 0 ? ((crc << 1) ^ 0x1021) : (crc << 1)
+        }
+        table.append(crc & 0xffff)
+        i++
+    }
+    return table
+}
+
+// Where the keys of a command are, by command name
+value KEYS_NONE (0)          // no key: any node
+value KEYS_FIRST (1)         // the first argument
+value KEYS_ALL (2)           // every argument
+value KEYS_PAIRS (3)         // every other argument: key value key value
+value KEYS_ALL_BUT_LAST (4)  // every argument but the timeout at the end
+value KEYS_TWO (5)           // the first two arguments
+value KEYS_COUNT_AT_2 (6)    // a key count in the second argument, the keys after it
+value KEYS_COUNT_AT_1 (7)    // a key count in the first argument, the keys after it
+value KEYS_DEST_COUNT (8)    // a destination key, a key count, then the keys
+value KEYS_STREAMS (9)       // the first half of what follows STREAMS
+value KEYS_SECOND (10)       // a subcommand, then the key
+value KEYS_REFUSED (11)      // needs one connection for several commands
+value READ_ONLY (16)         // may be read from a replica
+
+global COMMAND_KEYS: Map[uint] (command_keys())
+
+fn command_keys() Map[uint] {
+    let map: Map[uint] = .{}
+    add_commands(map, KEYS_NONE, "PING ECHO INFO TIME DBSIZE KEYS SCAN RANDOMKEY FLUSHDB FLUSHALL CONFIG CLIENT CLUSTER COMMAND SCRIPT FUNCTION PUBLISH PUBSUB ROLE LASTSAVE SAVE BGSAVE BGREWRITEAOF SLOWLOG LATENCY ACL MODULE DEBUG WAIT HELLO AUTH READONLY READWRITE")
+    add_commands(map, KEYS_FIRST | READ_ONLY, "GET GETRANGE SUBSTR STRLEN GETBIT BITCOUNT BITPOS TTL PTTL EXPIRETIME PEXPIRETIME TYPE HGET HMGET HGETALL HKEYS HVALS HLEN HEXISTS HSTRLEN HRANDFIELD HSCAN LRANGE LLEN LINDEX LPOS SMEMBERS SISMEMBER SMISMEMBER SCARD SRANDMEMBER SSCAN ZRANGE ZRANGEBYSCORE ZRANGEBYLEX ZREVRANGE ZREVRANGEBYSCORE ZREVRANGEBYLEX ZSCORE ZMSCORE ZCARD ZCOUNT ZLEXCOUNT ZRANK ZREVRANK ZRANDMEMBER ZSCAN XRANGE XREVRANGE XLEN GEOPOS GEODIST GEOHASH GEOSEARCH DUMP")
+    add_commands(map, KEYS_ALL | READ_ONLY, "MGET EXISTS SINTER SUNION SDIFF TOUCH")
+    add_commands(map, KEYS_ALL, "DEL UNLINK PFCOUNT PFMERGE SINTERSTORE SUNIONSTORE SDIFFSTORE")
+    add_commands(map, KEYS_PAIRS, "MSET MSETNX")
+    add_commands(map, KEYS_ALL_BUT_LAST, "BLPOP BRPOP BZPOPMIN BZPOPMAX")
+    add_commands(map, KEYS_TWO, "RENAME RENAMENX SMOVE RPOPLPUSH LMOVE BLMOVE BRPOPLPUSH COPY ZRANGESTORE GEOSEARCHSTORE")
+    add_commands(map, KEYS_COUNT_AT_2, "EVAL EVALSHA FCALL BLMPOP BZMPOP")
+    add_commands(map, KEYS_COUNT_AT_2 | READ_ONLY, "EVAL_RO EVALSHA_RO FCALL_RO")
+    add_commands(map, KEYS_COUNT_AT_1, "LMPOP ZMPOP")
+    add_commands(map, KEYS_COUNT_AT_1 | READ_ONLY, "ZUNION ZINTER ZDIFF SINTERCARD ZINTERCARD")
+    add_commands(map, KEYS_DEST_COUNT, "ZUNIONSTORE ZINTERSTORE ZDIFFSTORE")
+    add_commands(map, KEYS_STREAMS, "XREAD XREADGROUP")
+    add_commands(map, KEYS_SECOND, "OBJECT MEMORY XINFO XGROUP")
+    add_commands(map, KEYS_REFUSED, "MULTI EXEC DISCARD WATCH UNWATCH SELECT SUBSCRIBE PSUBSCRIBE SSUBSCRIBE UNSUBSCRIBE PUNSUBSCRIBE SUNSUBSCRIBE MONITOR QUIT RESET")
+    return map
+}
+
+fn add_commands(map: Map[uint], kind: uint, names: String) {
+    each names.split(" ") as name {
+        map.set(name, kind)
+    }
+}
+
+// Returns the slot the keys of a command hash to, or -1 for a command without keys, and
+// whether the command only reads. Keys in different slots throw `cluster` with `CROSSSLOT`.
+fn command_slot(args: Array[String]) (int, bool) !Error {
+    if args.length == 0 : throw .server { message: "No command was given" }
+    let name = (args.get(0) !? "").upper()
+    let spec = COMMAND_KEYS.get(name) !? KEYS_FIRST
+    let read = (spec & READ_ONLY) != 0
+    let kind = spec & 15
+    let count = args.length
+
+    let first: uint = 1
+    let end: uint = count // one past the last key
+    let step: uint = 1
+    if kind == KEYS_NONE : return (-1, read)
+    if kind == KEYS_REFUSED {
+        throw .cluster {
+            error_code: name
+            message: "`" + name + "` needs one connection for several commands; take one from `Cluster.connection_for(key)`"
+        }
+    }
+    if kind == KEYS_FIRST : end = 2
+    else if kind == KEYS_PAIRS : step = 2
+    else if kind == KEYS_ALL_BUT_LAST : end = count - 1
+    else if kind == KEYS_TWO : end = 3
+    else if kind == KEYS_SECOND {
+        first = 2
+        end = 3
+    } else if kind == KEYS_COUNT_AT_2 || kind == KEYS_COUNT_AT_1 || kind == KEYS_DEST_COUNT {
+        let at: uint = kind == KEYS_COUNT_AT_1 ? 1 : 2
+        let keys = (args.get(at) !? "0").to_uint() !? 0
+        first = at + 1
+        end = first + keys
+        if kind == KEYS_DEST_COUNT {
+            // The destination key counts too
+            let slot = key_slot(args.get(1) !? "")
+            if end > count : end = count
+            check_same_slot(args, first, end, 1, slot) !>
+            return (slot.to(int), read)
+        }
+    } else if kind == KEYS_STREAMS {
+        first = 0
+        let i: uint = 1
+        while i < count {
+            if (args.get(i) !? "").upper() == "STREAMS" {
+                first = i + 1
+                break
+            }
+            i++
+        }
+        if first == 0 : return (-1, read)
+        end = first + (count - first) / 2
+    }
+
+    if end > count : end = count
+    if first >= end : return (-1, read)
+    let slot = key_slot(args.get(first) !? "")
+    check_same_slot(args, first + step, end, step, slot) !>
+    return (slot.to(int), read)
+}
+
+fn check_same_slot(args: Array[String], from: uint, end: uint, step: uint, slot: uint) !Error {
+    let i = from
+    while i < end {
+        if key_slot(args.get(i) !? "") != slot : throw_cross_slot()
+        i += step
+    }
+}
+
+fn throw_cross_slot() !Error $throw {
+    throw .cluster {
+        error_code: "CROSSSLOT"
+        message: "The keys of this command live in different slots of the cluster, and a command may only touch keys of one node. Give the keys that belong together the same hash tag, as in `{user:1}:name`, or send one command per key."
+    }
+}

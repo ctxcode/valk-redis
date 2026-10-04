@@ -36,6 +36,8 @@ use valk.time
     /// Where the sentinels are, for a pool made with `from_sentinel`; null for a fixed server.
     ~ sentinel: ?SentinelConfig (null)
     idle: Array[Connection] (.{})
+    // Sends READONLY on every new connection, for reads from cluster replicas
+    readonly: bool (false)
     /// How many connections the pool has: idle plus handed out.
     ~ size: uint (0)
     /// How many connections are handed out at this moment.
@@ -163,7 +165,14 @@ use valk.time
     fn open() Connection !Error {
         let sentinel = this.sentinel
         if isset(sentinel) : return connect_sentinel(sentinel) !>
-        return connect_with(this.config) !>
+        let con = connect_with(this.config) !>
+        if this.readonly {
+            con.run(.{ "READONLY" }) ! {
+                con.close()
+                throw E
+            }
+        }
+        return con
     }
 
     fn drop() {

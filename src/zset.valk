@@ -6,7 +6,7 @@
     + score: float
 }
 
-extend Connection {
+trait ZsetCommands {
 
     /// Adds a member to a sorted set, or changes its score, and returns whether it is new.
     + fn zadd(key: String, score: float, member: String) bool !Error {

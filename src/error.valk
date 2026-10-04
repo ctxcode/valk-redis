@@ -7,8 +7,9 @@
 /// - `server`: the server answered with an error reply. `error_code` holds its first word, such as
 ///   `WRONGTYPE` or `NOSCRIPT`, and `message` the whole text.
 /// - `cluster`: the server is part of a cluster and answered that the command belongs somewhere
-///   else, or that the cluster is not serving it. This client talks to one server and does not
-///   follow redirects; `error_code` holds the word the server used (`MOVED`, `ASK`,
+///   else, or that the cluster is not serving it. A `Connection` does not follow redirects; a
+///   `Cluster` does, and throws this when it gave up or when the keys of a command are in
+///   different slots. `error_code` holds the word the server used (`MOVED`, `ASK`,
 ///   `CROSSSLOT`, `CLUSTERDOWN` or `TRYAGAIN`) and `message` explains what it means.
 /// - `timeout`: a read ran past the connection timeout.
 /// - `type`: the reply had another shape than the called method expects.

@@ -1,6 +1,6 @@
 use valk.crypto
 
-extend Connection {
+trait ScriptCommands {
 
     /// Runs a Lua script on the server and returns its reply.
     ///
@@ -17,6 +17,13 @@ extend Connection {
         return this.eval_command("EVALSHA", sha, keys, args) !>
     }
 
+    fn eval_command(command: String, script: String, keys: Array[String], args: Array[String]) Value !Error {
+        return this.run(eval_args(command, script, keys, args)) !>
+    }
+}
+
+extend Connection {
+
     /// Stores a script on the server and returns its SHA-1.
     + fn script_load(source: String) String !Error {
         return (this.run(.{ "SCRIPT", "LOAD", source }) !>).to_string()
@@ -27,13 +34,13 @@ extend Connection {
         let reply = this.run(.{ "SCRIPT", "EXISTS", sha }) !>
         return (reply.get(0) !? Value.null()).to_int() > 0
     }
+}
 
-    fn eval_command(command: String, script: String, keys: Array[String], args: Array[String]) Value !Error {
-        let all = Array[String]{ command, script, keys.length }
-        all.append_many(keys)
-        all.append_many(args)
-        return this.run(all) !>
-    }
+fn eval_args(command: String, script: String, keys: Array[String], args: Array[String]) Array[String] {
+    let all = Array[String]{ command, script, keys.length }
+    all.append_many(keys)
+    all.append_many(args)
+    return all
 }
 
 /// A Lua script that is sent to the server once and then run by its SHA-1.
@@ -66,10 +73,12 @@ extend Connection {
     }
 
     /// Runs the script and returns its reply.
-    + fn run(con: Connection, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
-        return con.evalsha(this.sha, keys, args) ! {
+    ///
+    /// `con` is a `Connection` or a `Cluster`.
+    + fn run(con: Client, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
+        return con.run(eval_args("EVALSHA", this.sha, keys, args)) ! {
             if error_is(E.code, server) && E.error_code == "NOSCRIPT" {
-                return con.eval(this.source, keys, args) !>
+                return con.run(eval_args("EVAL", this.source, keys, args)) !>
             }
             throw E
         }

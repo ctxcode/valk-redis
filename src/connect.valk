@@ -56,11 +56,26 @@ value MAX_DEPTH (64)
     return con
 }
 
+/// A `Connection` or a `Cluster`: something that runs commands.
++ interface Client {
+    /// Runs one command and returns its reply; an error reply throws `server`.
+    + fn run(args: Array[String]) Value !Error;
+}
+
 /// A connection to one server.
 ///
 /// A connection carries one command at a time, so it belongs to one coroutine or one thread.
 /// Give every worker its own.
-+ class Connection {
++ class Connection is Client {
+    use KeyCommands
+    use HashCommands
+    use ListCommands
+    use SetCommands
+    use ZsetCommands
+    use StreamCommands
+    use ScanCommands
+    use ScriptCommands
+    use PublishCommands
     con: net.TcpConnection
     //
     /// The settings this connection was opened with.
@@ -90,6 +105,11 @@ value MAX_DEPTH (64)
     /// Whether the server refused a write with `READONLY`: it is a replica now, as a primary
     /// becomes one after a failover. A pool made with `Pool.from_sentinel` drops it.
     ~ saw_readonly: bool (false)
+
+    // A connection is a socket, not a value: a clone is the same connection
+    fn clone() SELF $clone {
+        return this
+    }
 
     fn init() !Error {
         let config = this.config
@@ -363,18 +383,13 @@ fn throw_reply_error(reply: Value) !Error $throw {
             if second > 0 : node = rest.range(second + 1, rest.length - second - 1)
         }
         let moving = code == "ASK" ? " while its slot is moving" : ""
-        let advice = "This client talks to one server and does not follow cluster redirects; connect to that node, or use a cluster proxy or a single endpoint."
+        let advice = "A Connection talks to one server and does not follow cluster redirects; use `redis.connect_cluster` for a cluster."
         throw .cluster {
             error_code: code
             message: "The key of this command belongs to another node of the cluster (%{node})%{moving}. %{advice}"
         }
     }
-    if code == "CROSSSLOT" {
-        throw .cluster {
-            error_code: code
-            message: "The keys of this command live in different slots of the cluster, and a command may only touch keys of one node. Give the keys that belong together the same hash tag, as in `{user:1}:name`, or send one command per key."
-        }
-    }
+    if code == "CROSSSLOT" : throw_cross_slot()
     if code == "CLUSTERDOWN" {
         throw .cluster {
             error_code: code

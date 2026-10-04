@@ -1,0 +1,424 @@
+use redis
+use valk.time
+
+// The cluster started by tests/server.sh: three primaries with a replica each. The tests that
+// change it are synctests, so that they run after the others and one at a time.
+value CLUSTER_FIRST_PORT (7101)
+value CLUSTER_NODES (6)
+
+fn cluster_config() redis.ClusterConfig {
+    return redis.ClusterConfig { nodes: .{ "127.0.0.1:7101", "127.0.0.1:7102" } }
+}
+
+fn connect_cluster() redis.Cluster !redis.Error {
+    return redis.connect_cluster(cluster_config()) !>
+}
+
+fn node_con(address: String) redis.Connection !redis.Error {
+    let colon = address.index_of_byte(':') !? 0
+    let port = (address.range(colon + 1, address.length - colon - 1).to_uint() !? 0).to(u32)
+    return redis.connect("127.0.0.1", port) !>
+}
+
+fn node_id(address: String) String !redis.Error {
+    let con = node_con(address) !>
+    defer con.close()
+    return (con.run(.{ "CLUSTER", "MYID" }) !>).to_string()
+}
+
+// Moves a slot with its keys from one primary to another, the way redis-cli reshards
+fn move_slot(slot: uint, from: String, to: String) !redis.Error {
+    start_migration(slot, from, to) !>
+    finish_migration(slot, from, to) !>
+}
+
+fn start_migration(slot: uint, from: String, to: String) !redis.Error {
+    let source = node_con(from) !>
+    defer source.close()
+    let target = node_con(to) !>
+    defer target.close()
+    target.run(.{ "CLUSTER", "SETSLOT", slot, "IMPORTING", node_id(from) !> }) !>
+    source.run(.{ "CLUSTER", "SETSLOT", slot, "MIGRATING", node_id(to) !> }) !>
+}
+
+fn finish_migration(slot: uint, from: String, to: String) !redis.Error {
+    let source = node_con(from) !>
+    defer source.close()
+    let target_host, target_port = split(to)
+    while true {
+        let keys = (source.run(.{ "CLUSTER", "GETKEYSINSLOT", slot, 100 }) !>).to_strings()
+        if keys.length == 0 : break
+        let args = Array[String]{ "MIGRATE", target_host, target_port, "", 0, 5000, "KEYS" }
+        args.append_many(keys)
+        source.run(args) !>
+    }
+    let id = node_id(to) !>
+    // The new owner first, then the old one, then every other primary
+    let target = node_con(to) !>
+    target.run(.{ "CLUSTER", "SETSLOT", slot, "NODE", id }) !>
+    target.close()
+    source.run(.{ "CLUSTER", "SETSLOT", slot, "NODE", id }) !>
+    let i: uint = 0
+    while i < CLUSTER_NODES {
+        let con = redis.connect("127.0.0.1", (CLUSTER_FIRST_PORT + i).to(u32)) !>
+        let role = con.run(.{ "ROLE" }) !>
+        if (role.get(0) !? redis.Value.null()).to_string() == "master" {
+            con.run(.{ "CLUSTER", "SETSLOT", slot, "NODE", id }) !>
+        }
+        con.close()
+        i++
+    }
+}
+
+fn split(address: String) (String, uint) {
+    let colon = address.index_of_byte(':') !? 0
+    return (address.range(0, colon), address.range(colon + 1, address.length - colon - 1).to_uint() !? 0)
+}
+
+// Another primary than `address`
+fn other_primary(cluster: redis.Cluster, address: String) String {
+    each cluster.primaries() as primary {
+        if primary != address : return primary
+    }
+    return address
+}
+
+test "Cluster key slots" {
+    // The values CLUSTER KEYSLOT gives
+    assert(redis.key_slot("123456789") == 12739)
+    assert(redis.key_slot("user1000") == 3443)
+    // Only the part between the first { and the } after it counts
+    assert(redis.key_slot("{user1000}.following") == 3443)
+    assert(redis.key_slot("{user1000}.followers") == 3443)
+    assert(redis.key_slot("foo{{bar}}zap") == 4015)
+    assert(redis.key_slot("{{bar}}") == 4015)
+    // An empty tag hashes the whole key
+    assert(redis.key_slot("foo{}{bar}") == 8363)
+}
+
+test "Cluster routes every key to its node" {
+    let cluster = connect_cluster() ! { println(E.message) assert(false) return }
+    defer cluster.close()
+    assert(cluster.primaries().length == 3)
+    assert(cluster.ping())
+
+    let used: Map[bool] = .{}
+    let i: uint = 0
+    while i < 60 {
+        let key = "valk-test:route:%{i}"
+        cluster.set(key, "v%{i}") ! { println(E.message) assert(false) return }
+        let address = cluster.primary_for(key) ! { assert(false) return }
+        used.set(address, true)
+        // The key is on that node itself
+        let con = node_con(address) ! { assert(false) return }
+        assert((con.get(key) !? null) == "v%{i}")
+        con.close()
+        i++
+    }
+    assert(used.length == 3)
+
+    i = 0
+    while i < 60 {
+        assert((cluster.get("valk-test:route:%{i}") !? null) == "v%{i}")
+        i++
+    }
+
+    // Typed methods of every kind
+    cluster.hset("valk-test:hash", "a", "1") ! { assert(false) return }
+    assert((cluster.hget("valk-test:hash", "a") !? null) == "1")
+    cluster.rpush("valk-test:list", "x") ! { assert(false) return }
+    assert((cluster.lpop("valk-test:list") !? null) == "x")
+    assert((cluster.incr("valk-test:counter") !? 0) > 0)
+
+    let keys = cluster.keys("valk-test:route:*") ! { assert(false) return }
+    assert(keys.length == 60)
+    let scanned = cluster.scan_iter("valk-test:route:*").all() ! { assert(false) return }
+    assert(scanned.unique().length == 60)
+    assert((cluster.dbsize() !? 0) >= 60)
+
+    i = 0
+    while i < 60 {
+        cluster.del("valk-test:route:%{i}") ! { assert(false) return }
+        i++
+    }
+    cluster.del("valk-test:hash") _
+    cluster.del("valk-test:counter") _
+}
+
+test "Cluster over RESP3" {
+    let config = cluster_config()
+    config.protocol = 3
+    let cluster = redis.connect_cluster(config) ! { println(E.message) assert(false) return }
+    defer cluster.close()
+    cluster.hset_many("valk-test:resp3", .{ "a" => "1", "b" => "2" }) ! { assert(false) return }
+    let fields = cluster.hgetall("valk-test:resp3") ! { assert(false) return }
+    assert((fields.get("b") !? "") == "2")
+    cluster.del("valk-test:resp3") _
+}
+
+test "Cluster keys of one command share a slot" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+
+    // A hash tag puts them together
+    cluster.mset(.{ "{valk-user:1}:name" => "Ada", "{valk-user:1}:role" => "admin" }) ! { println(E.message) assert(false) return }
+    let values = cluster.mget(.{ "{valk-user:1}:name", "{valk-user:1}:role" }) ! { assert(false) return }
+    assert((values.get(0) !? null) == "Ada")
+    assert((values.get(1) !? null) == "admin")
+    assert((cluster.del_many(.{ "{valk-user:1}:name", "{valk-user:1}:role" }) !? 0) == 2)
+
+    // Without one, the client refuses before anything is sent
+    cluster.mget(.{ "valk-a", "valk-b" }) ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "CROSSSLOT")
+        assert(E.message.contains("hash tag"))
+        return
+    }
+    assert(false)
+}
+
+test "Cluster commands that need one connection" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+
+    cluster.run(.{ "MULTI" }) ! {
+        assert(error_is(E.code, cluster))
+        assert(E.message.contains("connection_for"))
+
+        // A transaction on the node of one slot
+        let con = cluster.connection_for("{valk-tx}") ! { assert(false) return }
+        con.multi() ! { assert(false) return }
+        con.queue(.{ "SET", "{valk-tx}:a", 1 }) ! { assert(false) return }
+        con.queue(.{ "INCR", "{valk-tx}:a" }) ! { assert(false) return }
+        defer cluster.put(con)
+        let replies = con.exec() ! { assert(false) return }
+        assert(isset(replies))
+        if isset(replies) : assert((replies.get(1) !? redis.Value.null()).to_int() == 2)
+        assert((cluster.get("{valk-tx}:a") !? null) == "2")
+        cluster.del("{valk-tx}:a") _
+        return
+    }
+    assert(false)
+}
+
+test "Cluster scripts and pipelines" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+
+    let script = redis.Script.new("return redis.call('INCRBY', KEYS[1], ARGV[1])")
+    cluster.del("valk-test:script") _
+    assert((script.run(cluster, .{ "valk-test:script" }, .{ "5" }) !? redis.Value.null()).to_int() == 5)
+    assert((script.run(cluster, .{ "valk-test:script" }, .{ "5" }) !? redis.Value.null()).to_int() == 10)
+    cluster.del("valk-test:script") _
+
+    let pipe = cluster.pipeline()
+    let i: uint = 0
+    while i < 30 {
+        pipe.add(.{ "SET", "valk-test:pipe:%{i}", i })
+        pipe.add(.{ "GET", "valk-test:pipe:%{i}" })
+        i++
+    }
+    pipe.add(.{ "MGET", "valk-a", "valk-b" })
+    let replies = pipe.exec() ! { assert(false) return }
+    assert(replies.length == 61)
+    i = 0
+    while i < 30 {
+        assert((replies.get(i * 2) !? redis.Value.null()).to_string() == "OK")
+        assert((replies.get(i * 2 + 1) !? redis.Value.null()).to_int() == i)
+        i++
+    }
+    // One command that cannot run does not hide the others
+    let refused = replies.get(60) !? redis.Value.null()
+    assert(refused.is_error())
+    assert(refused.code == "CROSSSLOT")
+    assert(pipe.count == 0)
+
+    i = 0
+    while i < 30 {
+        cluster.del("valk-test:pipe:%{i}") _
+        i++
+    }
+}
+
+synctest "Cluster follows a slot that moved" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+    let key = "{valk-moved}:key"
+    let slot = redis.key_slot(key)
+    cluster.set(key, "before") ! { assert(false) return }
+    let owner = cluster.primary_for(key) ! { assert(false) return }
+    let other = other_primary(cluster, owner)
+    let refreshes = cluster.refreshes
+
+    // Resharded behind the client's back: its first try gets MOVED
+    move_slot(slot, owner, other) ! { println(E.message) assert(false) return }
+    assert((cluster.get(key) !? null) == "before")
+    cluster.set(key, "after") ! { assert(false) return }
+    assert((cluster.primary_for(key) !? "") == other)
+    // A slot that moved between known primaries needs no new slot map
+    assert(cluster.refreshes == refreshes)
+
+    // A pipeline that meets the redirect still gets every reply
+    move_slot(slot, other, owner) ! { println(E.message) assert(false) return }
+    let pipe = cluster.pipeline()
+    pipe.add(.{ "GET", key })
+    pipe.add(.{ "SET", key, "piped" })
+    let replies = pipe.exec() ! { assert(false) return }
+    assert((replies.get(0) !? redis.Value.null()).to_string() == "after")
+    assert((replies.get(1) !? redis.Value.null()).to_string() == "OK")
+    assert((cluster.primary_for(key) !? "") == owner)
+
+    cluster.del(key) _
+}
+
+synctest "Cluster follows ASK while a slot migrates" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+    let old_key = "{valk-ask}:old"
+    let new_key = "{valk-ask}:new"
+    let slot = redis.key_slot(old_key)
+    cluster.del(new_key) _
+    cluster.set(old_key, "here") ! { assert(false) return }
+    let owner = cluster.primary_for(old_key) ! { assert(false) return }
+    let other = other_primary(cluster, owner)
+
+    start_migration(slot, owner, other) ! { println(E.message) assert(false) return }
+    // A key the old node still has is served there
+    assert((cluster.get(old_key) !? null) == "here")
+    // A new key goes to the importing node, through ASK
+    cluster.set(new_key, "there") ! { println(E.message) assert(false) return }
+    assert((cluster.get(new_key) !? null) == "there")
+    // ASK does not change the slot map
+    assert((cluster.primary_for(old_key) !? "") == owner)
+    let target = node_con(other) ! { assert(false) return }
+    target.run(.{ "ASKING" }) _
+    assert((target.get(new_key) !? null) == "there")
+    target.close()
+
+    // Both keys in one command while they are on two nodes: TRYAGAIN, retried and then reported
+    let impatient = cluster_config()
+    impatient.max_retries = 2
+    impatient.retry_delay_ms = 10
+    let other_client = redis.connect_cluster(impatient) ! { assert(false) return }
+    other_client.mget(.{ old_key, new_key }) ! {
+        assert(error_is(E.code, cluster))
+        assert(E.error_code == "TRYAGAIN")
+    }
+    other_client.close()
+
+    finish_migration(slot, owner, other) ! { println(E.message) assert(false) return }
+    let values = cluster.mget(.{ old_key, new_key }) ! { println(E.message) assert(false) return }
+    assert((values.get(0) !? null) == "here")
+    assert((values.get(1) !? null) == "there")
+    assert((cluster.primary_for(old_key) !? "") == other)
+
+    move_slot(slot, other, owner) ! { println(E.message) assert(false) return }
+    cluster.del_many(.{ old_key, new_key }) _
+}
+
+synctest "Cluster survives lost connections" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+    let key = "valk-test:lost"
+    cluster.set(key, "kept") ! { assert(false) return }
+    let owner = cluster.primary_for(key) ! { assert(false) return }
+
+    // The node drops every client, including the idle one in the pool
+    let con = node_con(owner) ! { assert(false) return }
+    con.run(.{ "CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes" }) ! { assert(false) return }
+    con.close()
+
+    assert((cluster.get(key) !? null) == "kept")
+    cluster.del(key) _
+}
+
+test "Cluster reads from replicas" {
+    let config = cluster_config()
+    config.read_from_replicas = true
+    let cluster = redis.connect_cluster(config) ! { assert(false) return }
+    defer cluster.close()
+    let key = "valk-test:replica-read"
+    cluster.set(key, "copied") ! { assert(false) return }
+
+    // A replica may be a moment behind
+    let value: ?String = null
+    let tries = 0
+    while tries++ < 50 {
+        value = cluster.get(key) !? null
+        if isset(value) : break
+        time.sleep_ms(20)
+    }
+    assert(value == "copied")
+
+    // Which a replica served, on a connection that sent READONLY
+    let found = false
+    let i: uint = 0
+    while i < CLUSTER_NODES {
+        let con = redis.connect("127.0.0.1", (CLUSTER_FIRST_PORT + i).to(u32)) ! { assert(false) return }
+        let role = (con.run(.{ "ROLE" }) !? redis.Value.null()).get(0) !? redis.Value.null()
+        let clients = (con.run(.{ "CLIENT", "LIST" }) !? redis.Value.null()).to_string()
+        if role.to_string() == "slave" && clients.contains("flags=r ") : found = true
+        con.close()
+        i++
+    }
+    assert(found)
+    cluster.del(key) _
+}
+
+synctest "Cluster recovers from a failover" {
+    let cluster = connect_cluster() ! { assert(false) return }
+    defer cluster.close()
+    let key = "valk-test:failover"
+    cluster.set(key, "before") ! { assert(false) return }
+    let owner = cluster.primary_for(key) ! { assert(false) return }
+    let host, owner_port = split(owner)
+    let refreshes = cluster.refreshes
+
+    // The replica of that primary takes over
+    let replica = ""
+    let i: uint = 0
+    while i < CLUSTER_NODES {
+        let port = CLUSTER_FIRST_PORT + i
+        let con = redis.connect("127.0.0.1", port.to(u32)) ! { assert(false) return }
+        let role = con.run(.{ "ROLE" }) ! { assert(false) return }
+        if (role.get(0) !? redis.Value.null()).to_string() == "slave" && (role.get(1) !? redis.Value.null()).to_string() == host && (role.get(2) !? redis.Value.null()).to_uint() == owner_port {
+            replica = "127.0.0.1:%{port}"
+            if !take_over(con, key) : assert(false)
+        }
+        con.close()
+        i++
+    }
+    assert(replica.length > 0)
+
+    // The old primary answers MOVED; the client finds the new one
+    cluster.set(key, "after") ! { println(E.message) assert(false) return }
+    assert((cluster.get(key) !? null) == "after")
+    assert((cluster.primary_for(key) !? "") == replica)
+    assert(cluster.primaries().length == 3)
+    // A primary it did not know made it read the slot map again
+    assert(cluster.refreshes > refreshes)
+    cluster.del(key) _
+}
+
+// Makes a replica take over from its primary. A replica still catching up refuses, so it waits
+// for the link and the data, and asks again when a try timed out.
+fn take_over(con: redis.Connection, key: String) bool {
+    con.run(.{ "READONLY" }) _
+    let attempt = 0
+    while attempt++ < 3 {
+        let tries = 0
+        while tries++ < 100 {
+            let role = con.run(.{ "ROLE" }) !? redis.Value.null()
+            if (role.get(3) !? redis.Value.null()).to_string() == "connected" && (con.get(key) !? null) == "before" : break
+            time.sleep_ms(50)
+        }
+        con.run(.{ "CLUSTER", "FAILOVER" }) ! return false
+        let waited = 0
+        while waited++ < 120 {
+            let role = con.run(.{ "ROLE" }) !? redis.Value.null()
+            if (role.get(0) !? redis.Value.null()).to_string() == "master" : return true
+            time.sleep_ms(50)
+        }
+    }
+    return false
+}

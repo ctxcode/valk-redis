@@ -27,6 +27,9 @@ extend Connection {
     + fn scan_iter(pattern: String (""), count: uint (0)) ScanIterator {
         return ScanIterator { con: this, command: "SCAN", key: "", pattern: pattern, count: count }
     }
+}
+
+trait ScanCommands {
 
     /// Reads one page of a set.
     + fn sscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[String]) !Error {
@@ -52,19 +55,23 @@ extend Connection {
     }
 
     fn scan_command(command: String, key: String, cursor: uint, pattern: String, count: uint) Value !Error {
-        let args = Array[String]{ command }
-        if key.length > 0 : args.append(key)
-        args.append(cursor)
-        if pattern.length > 0 {
-            args.append("MATCH")
-            args.append(pattern)
-        }
-        if count > 0 {
-            args.append("COUNT")
-            args.append(count)
-        }
-        return this.run(args) !>
+        return this.run(scan_args(command, key, cursor, pattern, count)) !>
     }
+}
+
+fn scan_args(command: String, key: String, cursor: uint, pattern: String, count: uint) Array[String] {
+    let args = Array[String]{ command }
+    if key.length > 0 : args.append(key)
+    args.append(cursor)
+    if pattern.length > 0 {
+        args.append("MATCH")
+        args.append(pattern)
+    }
+    if count > 0 {
+        args.append("COUNT")
+        args.append(count)
+    }
+    return args
 }
 
 // A scan reply is the next cursor and the items of this page
@@ -77,10 +84,12 @@ fn scan_items(reply: Value) Value {
 
 /// Walks the keys of a database, or the members of a set, one page at a time.
 ///
-/// `next` returns null once the walk is over. The iterator holds its connection, so no other
-/// command may run on that connection while it is walking.
+/// `next` returns null once the walk is over. On a cluster, `scan_iter` walks one primary
+/// after the other.
 + class ScanIterator {
-    con: Connection
+    con: Client
+    // The nodes still to walk after this one, for a cluster
+    rest: Array[Client] (.{})
     command: String
     key: String
     pattern: String
@@ -94,8 +103,11 @@ fn scan_items(reply: Value) Value {
     + fn next() ?String !Error {
         while true {
             if this.index < this.page.length : return this.page.get(this.index++) !? null
-            if this.started && this.cursor == 0 : return null
-            let reply = this.con.scan_command(this.command, this.key, this.cursor, this.pattern, this.count) !>
+            if this.started && this.cursor == 0 {
+                this.con = this.rest.pop_first() ! return null
+                this.started = false
+            }
+            let reply = this.con.run(scan_args(this.command, this.key, this.cursor, this.pattern, this.count)) !>
             this.cursor = scan_cursor(reply)
             this.page = scan_items(reply).to_strings()
             this.index = 0

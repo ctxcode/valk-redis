@@ -11,12 +11,17 @@
     + data: String
 }
 
-extend Connection {
-
+trait PublishCommands {
     /// Publishes a message and returns how many subscribers the server handed it to.
+    ///
+    /// On a cluster, the message reaches the subscribers of every node, and the count is that
+    /// of the node it was sent to.
     + fn publish(channel: String, message: String) uint !Error {
         return (this.run(.{ "PUBLISH", channel, message }) !>).to_uint()
     }
+}
+
+extend Connection {
 
     /// Subscribes to channels. Read what arrives with `next_message`.
     ///

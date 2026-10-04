@@ -1,0 +1,640 @@
+use valk.time
+
+/// Where to find a Redis Cluster, and how to talk to its nodes.
+///
+/// The login and TLS settings are the same for every node.
++ class ClusterConfig {
+    /// Some nodes of the cluster, as `host:port`. One that answers is enough: it tells where the
+    /// others are.
+    + nodes: Array[String]
+    /// The password, or "" for a cluster without one.
+    + password: String ("")
+    /// The ACL user name, or "" to log in with the password alone.
+    + username: String ("")
+    /// How long connecting to a node may take, in milliseconds.
+    + timeout_ms: uint (5000)
+    /// The protocol to speak: 2 or 3.
+    + protocol: uint (2)
+    /// TLS settings, or null for connections without TLS.
+    + tls: ?TlsOptions (null)
+    /// Whether commands that only read go to the replicas of a slot, which may be a moment
+    /// behind their primary.
+    + read_from_replicas: bool (false)
+    /// The greatest number of connections to one node. 0 is no limit.
+    + max_connections: uint (16)
+    /// How many idle connections are kept per node.
+    + max_idle: uint (8)
+    /// How many `MOVED` and `ASK` redirects one command may follow.
+    + max_redirects: uint (16)
+    /// How many times a command is sent again after a lost connection, `TRYAGAIN` or
+    /// `CLUSTERDOWN`.
+    + max_retries: uint (6)
+    /// The wait before the first retry in milliseconds; it doubles with every retry, up to a
+    /// second.
+    + retry_delay_ms: uint (50)
+}
+
+class Node {
+    address: String
+    pool: Pool
+}
+
+class Shard {
+    primary: Node
+    replicas: Array[Node] (.{})
+    next: uint (0)
+}
+
+/// A client for a Redis Cluster.
+///
+/// It knows which node serves which of the 16384 slots, keeps a `Pool` per node, and sends
+/// every command to the node of its key. When a slot moved it follows the `MOVED` or `ASK`
+/// answer, and after a lost connection, `TRYAGAIN` or `CLUSTERDOWN` it waits a little and
+/// tries again. It has the same command methods as a `Connection`.
+///
+/// ```valk
+/// let cluster = redis.connect_cluster(redis.ClusterConfig {
+///     nodes: .{ "10.0.0.1:6379", "10.0.0.2:6379" }
+/// }) ! panic("%{E.message}")
+/// cluster.set("user:1", "Ada") ! panic("%{E.message}")
+/// ```
+///
+/// The keys of one command must share a slot; give them the same hash tag, as in
+/// `{user:1}:name` and `{user:1}:mail`. Like a `Pool`, a cluster client belongs to one thread,
+/// and the coroutines of that thread can share it.
++ class Cluster is Client {
+    use KeyCommands
+    use HashCommands
+    use ListCommands
+    use SetCommands
+    use ZsetCommands
+    use StreamCommands
+    use ScanCommands
+    use ScriptCommands
+    use PublishCommands
+
+    /// The settings this client was made with.
+    + config: ClusterConfig
+    nodes: Map[Node] (.{})
+    shards: Array[Shard] (.{})
+    // For every slot the index of its shard plus one, 0 while no node is known for it
+    slots: Array[uint] (Array[uint].fill(SLOT_COUNT, 0))
+    next_primary: uint (0)
+    /// How many times the slot map was read from the cluster.
+    ~ refreshes: uint (0)
+
+    /// Runs one command on the node of its key and returns the reply.
+    ///
+    /// A command without a key goes to one of the primaries. `MULTI`, `WATCH` and the
+    /// subscribe commands need a connection of their own: see `connection_for`.
+    + fn run(args: Array[String]) Value !Error {
+        let reply = this.run_raw(args) !>
+        if reply.type == TYPE.error : throw_reply_error(reply)
+        return reply
+    }
+
+    /// The same as `run`, but an error reply is returned as a `Value` of type `error` instead
+    /// of thrown.
+    + fn run_raw(args: Array[String]) Value !Error {
+        let slot, read = command_slot(args) !>
+        return this.run_on_slot(args, slot, read) !>
+    }
+
+    fn run_on_slot(args: Array[String], slot: int, read: bool) Value !Error {
+        let ask: ?Node = null
+        let redirects: uint = 0
+        let retries: uint = 0
+        while true {
+            let target = ask
+            if !isset(target) : target = this.node_for_slot(slot, read && this.config.read_from_replicas) !>
+            let asking = isset(ask)
+            ask = null
+            let reply = this.send(target, args, asking) ! {
+                if !error_is(E.code, connect) && !error_is(E.code, closed) : throw E
+                if retries >= this.config.max_retries : throw E
+                this.wait(retries++)
+                this.refresh() _
+                continue
+            }
+            if reply.type != TYPE.error : return reply
+            let code = reply.code
+            if code == "MOVED" || code == "ASK" {
+                if redirects++ >= this.config.max_redirects : return reply
+                let moved_slot, address = parse_redirect(reply.string_value, target.address)
+                let node = this.node(address)
+                if code == "ASK" {
+                    ask = node
+                    continue
+                }
+                this.moved(moved_slot, node)
+                continue
+            }
+            if code == "TRYAGAIN" || code == "CLUSTERDOWN" {
+                if retries >= this.config.max_retries : return reply
+                this.wait(retries++)
+                if code == "CLUSTERDOWN" : this.refresh() _
+                continue
+            }
+            return reply
+        }
+    }
+
+    // Runs a command on one node. ASKING goes first after an ASK redirect.
+    fn send(node: Node, args: Array[String], asking: bool) Value !Error {
+        let con = node.pool.get() !>
+        if asking : con.write_command(.{ "ASKING" })
+        con.write_command(args)
+        con.flush() ! {
+            node.pool.put(con)
+            throw E
+        }
+        if asking {
+            con.receive() ! {
+                con.close()
+                node.pool.put(con)
+                throw E
+            }
+        }
+        let reply = con.receive() ! {
+            // A reply that was not read leaves the connection out of step
+            con.close()
+            node.pool.put(con)
+            throw E
+        }
+        node.pool.put(con)
+        return reply
+    }
+
+    fn wait(retry: uint) {
+        let delay = this.config.retry_delay_ms << retry
+        if delay > 1000 : delay = 1000
+        time.sleep_ms(delay)
+    }
+
+    fn node(address: String) Node {
+        return this.nodes.get(address) ! {
+            let host, port = split_host_port(address)
+            let pool = Pool.new(Config {
+                host: host
+                port: port
+                password: this.config.password
+                username: this.config.username
+                timeout_ms: this.config.timeout_ms
+                protocol: this.config.protocol
+                tls: this.config.tls
+            }, this.config.max_connections, this.config.max_idle)
+            pool.readonly = this.config.read_from_replicas
+            let node = Node { address: address, pool: pool }
+            this.nodes.set(address, node)
+            return node
+        }
+    }
+
+    fn node_for_slot(slot: int, replica: bool) Node !Error {
+        if this.shards.length == 0 : this.refresh() !>
+        if slot < 0 {
+            let shard = this.shards.get(this.next_primary++ % this.shards.length) ! throw_no_node()
+            return shard.primary
+        }
+        let index = this.slots.get(slot.to(uint)) !? 0
+        if index == 0 {
+            this.refresh() !>
+            index = this.slots.get(slot.to(uint)) !? 0
+        }
+        let shard = this.shards.get(index - 1) ! {
+            throw .cluster { error_code: "CLUSTERDOWN", message: "No node of the cluster serves slot %{slot}" }
+        }
+        if replica && shard.replicas.length > 0 {
+            return shard.replicas.get(shard.next++ % shard.replicas.length) !? shard.primary
+        }
+        return shard.primary
+    }
+
+    // A slot moved to another node. A node that is not a known primary means the cluster
+    // changed more than that, so the whole map is read again.
+    fn moved(slot: uint, node: Node) {
+        each this.shards as shard, i {
+            if shard.primary == node {
+                this.slots.set(slot, i + 1) _
+                return
+            }
+        }
+        this.refresh() _
+        let index = this.slots.get(slot) !? 0
+        if index > 0 && (this.shards.get(index - 1) ! return).primary == node : return
+        this.shards.append(Shard { primary: node })
+        this.slots.set(slot, this.shards.length) _
+    }
+
+    /// Reads which node serves which slot from the cluster again.
+    ///
+    /// This happens by itself when the cluster answers that a slot moved; call it after
+    /// changing the cluster from elsewhere to skip the redirects.
+    + fn refresh() !Error {
+        let candidates = Array[String]{}
+        each this.shards as shard {
+            candidates.append(shard.primary.address)
+        }
+        each this.config.nodes as address {
+            candidates.append(address, true)
+        }
+        if candidates.length == 0 : throw .connect { message: "No node of the cluster was given" }
+
+        let last_message = ""
+        let answered = false
+        each candidates as address {
+            let node = this.node(address)
+            let reply = this.send(node, .{ "CLUSTER", "SLOTS" }, false) ! {
+                last_message = "%{address}: " + E.message
+                continue
+            }
+            answered = true
+            if reply.type == TYPE.error {
+                last_message = "%{address}: " + reply.string_value
+                continue
+            }
+            if reply.count == 0 {
+                last_message = "%{address} serves no slots"
+                continue
+            }
+            this.apply_slots(reply, host_of(address).trim("[").trim("]"))
+            this.refreshes++
+            return
+        }
+        let message = "No node of the cluster could tell where the slots are: " + last_message
+        if answered : throw .cluster { error_code: "CLUSTERDOWN", message: message }
+        throw .connect { message: message }
+    }
+
+    // Reads a CLUSTER SLOTS reply: start, end, primary, replicas... per range
+    fn apply_slots(reply: Value, default_host: String) {
+        let shards = Array[Shard]{}
+        let by_primary: Map[uint] = .{}
+        let used: Map[bool] = .{}
+        this.slots.set_all(0)
+        each reply.to_array() as range {
+            let start = (range.get(0) !? Value.null()).to_uint()
+            let end = (range.get(1) !? Value.null()).to_uint()
+            let primary = node_address(range.get(2) !? Value.null(), default_host)
+            if primary.length == 0 : continue
+            let index = by_primary.get(primary) !? <{
+                let shard = Shard { primary: this.node(primary) }
+                used.set(primary, true)
+                let i: uint = 3
+                while i < range.count {
+                    let replica = node_address(range.get(i) !? Value.null(), default_host)
+                    if replica.length > 0 {
+                        shard.replicas.append(this.node(replica))
+                        used.set(replica, true)
+                    }
+                    i++
+                }
+                shards.append(shard)
+                by_primary.set(primary, shards.length)
+                return shards.length
+            }
+            let slot = start
+            while slot <= end && slot < SLOT_COUNT {
+                this.slots.set(slot, index) _
+                slot++
+            }
+        }
+        this.shards = shards
+
+        // Nodes that left the cluster: their pools close as their connections come back
+        each this.nodes.keys() as address {
+            if used.has(address) : continue
+            let node = this.nodes.get(address) ! continue
+            node.pool.close_idle()
+            this.nodes.remove(address)
+        }
+    }
+
+    /// Returns the address of the primary that serves the slot of `key`, as `host:port`.
+    + fn primary_for(key: String) String !Error {
+        return (this.node_for_slot(key_slot(key).to(int), false) !>).address
+    }
+
+    /// Returns the addresses of the primaries, as `host:port`.
+    + fn primaries() Array[String] {
+        let out = Array[String]{}
+        each this.shards as shard {
+            out.append(shard.primary.address)
+        }
+        return out
+    }
+
+    /// Takes a connection to the primary of `key` out of its pool, for what needs one
+    /// connection for several commands: a transaction, a blocking command or a subscription.
+    /// Give it back with `put`.
+    ///
+    /// ```valk
+    /// let con = cluster.connection_for("{user:1}") ! panic("%{E.message}")
+    /// defer cluster.put(con)
+    /// con.multi() ! panic("%{E.message}")
+    /// con.queue(.{ "INCR", "{user:1}:visits" }) ! panic("%{E.message}")
+    /// con.queue(.{ "SET", "{user:1}:seen", "now" }) ! panic("%{E.message}")
+    /// con.exec() ! panic("%{E.message}")
+    /// ```
+    ///
+    /// The connection does not follow redirects: every key it touches must share the slot of
+    /// `key`, and a slot that moves in the meantime throws `cluster`.
+    + fn connection_for(key: String) Connection !Error {
+        let node = this.node_for_slot(key_slot(key).to(int), false) !>
+        return node.pool.get() !>
+    }
+
+    /// Gives back a connection from `connection_for`.
+    + fn put(con: Connection) {
+        let node = this.nodes.get(join_host_port(con.config.host, con.config.port)) ! {
+            con.close()
+            return
+        }
+        node.pool.put(con)
+    }
+
+    /// Runs a command on every primary and returns their replies, in the order of `primaries`.
+    + fn run_on_primaries(args: Array[String]) Array[Value] !Error {
+        if this.shards.length == 0 : this.refresh() !>
+        let out = Array[Value]{}
+        each this.shards as shard {
+            let reply = this.send(shard.primary, args, false) !>
+            if reply.type == TYPE.error : throw_reply_error(reply)
+            out.append(reply)
+        }
+        return out
+    }
+
+    /// Sends `PING` to every primary and returns whether all of them answered.
+    + fn ping() bool {
+        let replies = this.run_on_primaries(.{ "PING" }) !? Array[Value]{}
+        if replies.length == 0 : return false
+        each replies as reply {
+            if reply.to_string() != "PONG" : return false
+        }
+        return true
+    }
+
+    /// Returns every key matching a glob pattern, from every primary.
+    ///
+    /// This blocks each node while it walks its keys; `scan_iter` does not.
+    + fn keys(pattern: String ("*")) Array[String] !Error {
+        let out = Array[String]{}
+        each this.run_on_primaries(.{ "KEYS", pattern }) !> as reply {
+            out.append_many(reply.to_strings())
+        }
+        return out
+    }
+
+    /// Returns how many keys the cluster holds.
+    + fn dbsize() uint !Error {
+        let total: uint = 0
+        each this.run_on_primaries(.{ "DBSIZE" }) !> as reply {
+            total += reply.to_uint()
+        }
+        return total
+    }
+
+    /// Removes every key from every primary.
+    + fn flushdb() !Error {
+        this.run_on_primaries(.{ "FLUSHDB" }) !>
+    }
+    /// Removes every key from every primary; a cluster has one database, so this is `flushdb`.
+    + fn flushall() !Error {
+        this.run_on_primaries(.{ "FLUSHALL" }) !>
+    }
+
+    /// Stores a script on every primary and returns its SHA-1.
+    + fn script_load(source: String) String !Error {
+        let replies = this.run_on_primaries(.{ "SCRIPT", "LOAD", source }) !>
+        return (replies.get(0) !? Value.null()).to_string()
+    }
+
+    /// Walks every key of the cluster, one primary after the other.
+    + fn scan_iter(pattern: String (""), count: uint (0)) ScanIterator {
+        if this.shards.length == 0 : this.refresh() _
+        let targets = Array[Client]{}
+        each this.shards as shard {
+            targets.append(NodeClient { cluster: this, node: shard.primary })
+        }
+        let first = targets.pop_first() !? NodeClient { cluster: this, node: this.node(this.config.nodes.get(0) !? "127.0.0.1:6379") }
+        return ScanIterator { con: first, rest: targets, command: "SCAN", key: "", pattern: pattern, count: count }
+    }
+
+    /// Starts a pipeline: commands are sent per node in one go.
+    + fn pipeline() ClusterPipeline {
+        return ClusterPipeline { cluster: this }
+    }
+
+    /// Closes the idle connections to every node. Connections that are handed out close when
+    /// they come back.
+    + fn close() {
+        each this.nodes.values() as node {
+            node.pool.close_idle()
+        }
+    }
+}
+
+/// Connects to a Redis Cluster: asks the first node that answers where the slots are.
+///
+/// ```valk
+/// let cluster = redis.connect_cluster(redis.ClusterConfig {
+///     nodes: .{ "10.0.0.1:6379", "10.0.0.2:6379" }
+///     password: "secret"
+/// }) ! panic("%{E.message}")
+/// ```
++ fn connect_cluster(config: ClusterConfig) Cluster !Error {
+    if config.protocol != 2 && config.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
+    let cluster = Cluster { config: config }
+    cluster.refresh() !>
+    return cluster
+}
+
+// One node of a cluster as a Client, for walking its keys
+class NodeClient is Client {
+    cluster: Cluster
+    node: Node
+
+    + fn run(args: Array[String]) Value !Error {
+        let reply = this.cluster.send(this.node, args, false) !>
+        if reply.type == TYPE.error : throw_reply_error(reply)
+        return reply
+    }
+}
+
+/// Commands for a cluster, sent in one go per node.
+///
+/// The commands are grouped by the node of their key; every node gets its commands in one
+/// write, and the replies come back in the order the commands were added. A command that met
+/// a redirect or a lost connection is sent again on its own.
+///
+/// ```valk
+/// let pipe = cluster.pipeline()
+/// pipe.add(.{ "SET", "a", 1 })
+/// pipe.add(.{ "SET", "b", 2 })
+/// let replies = pipe.exec() ! panic("%{E.message}")
+/// ```
++ class ClusterPipeline {
+    cluster: Cluster
+    commands: Array[Array[String]] (.{})
+
+    /// How many commands are waiting to be sent.
+    + get count: uint {
+        return this.commands.length
+    }
+
+    /// Adds a command. Nothing is sent until `exec`.
+    + fn add(args: Array[String]) SELF {
+        this.commands.append(args)
+        return this
+    }
+
+    /// Sends every command and returns their replies in order.
+    ///
+    /// A command that failed is an `error` value in the result rather than a thrown error.
+    + fn exec() Array[Value] !Error {
+        let commands = this.commands
+        this.commands = .{}
+        let cluster = this.cluster
+        let replies = Array[Value].new(commands.length)
+        let again = Array[uint]{}
+        let batches = Array[Batch]{}
+        let by_node: Map[Batch] = .{}
+
+        // Every reply starts as null and is filled in below
+        each commands as args, i {
+            replies.append(Value.null())
+            let slot, read = command_slot(args) ! {
+                replies.set(i, error_value(E.message, E.error_code)) _
+                continue
+            }
+            let node = cluster.node_for_slot(slot, read && cluster.config.read_from_replicas) ! {
+                again.append(i)
+                continue
+            }
+            let batch = by_node.get(node.address) !? <{
+                let batch = Batch { node: node }
+                by_node.set(node.address, batch)
+                batches.append(batch)
+                return batch
+            }
+            batch.indexes.append(i)
+        }
+
+        // Write to every node first, then read, so that the nodes work at the same time
+        each batches as batch {
+            let con = batch.node.pool.get() ! {
+                again.append_many(batch.indexes)
+                continue
+            }
+            each batch.indexes as i {
+                con.write_command(commands.get(i) ! continue)
+            }
+            con.flush() ! {
+                batch.node.pool.put(con)
+                again.append_many(batch.indexes)
+                continue
+            }
+            batch.con = con
+        }
+        each batches as batch {
+            let con = batch.con
+            if !isset(con) : continue
+            let failed = false
+            each batch.indexes as i {
+                if failed {
+                    again.append(i)
+                    continue
+                }
+                let reply = con.receive() ! {
+                    failed = true
+                    again.append(i)
+                    continue
+                }
+                let code = reply.code
+                if reply.type == TYPE.error && (code == "MOVED" || code == "ASK" || code == "TRYAGAIN" || code == "CLUSTERDOWN") {
+                    again.append(i)
+                    continue
+                }
+                replies.set(i, reply) _
+            }
+            if failed : con.close()
+            batch.node.pool.put(con)
+        }
+
+        again.sort()
+        each again as i {
+            let args = commands.get(i) ! continue
+            let reply = cluster.run_raw(args) !? <{ return error_value(E.message, E.error_code) }
+            replies.set(i, reply) _
+        }
+        return replies
+    }
+
+    /// Throws away the commands that were added but not sent.
+    + fn clear() {
+        this.commands.clear()
+    }
+}
+
+class Batch {
+    node: Node
+    indexes: Array[uint] (.{})
+    con: ?Connection (null)
+}
+
+fn error_value(message: String, code: String) Value {
+    return Value { type: TYPE.error, string_value: message, code: code }
+}
+
+// MOVED 3999 127.0.0.1:6381; an address without a host means the host of the node that answered
+fn parse_redirect(text: String, from: String) (uint, String) {
+    let parts = text.split(" ")
+    let slot = (parts.get(1) !? "").to_uint() !? 0
+    let address = parts.get(2) !? from
+    if address.length > 0 && address[0] == ':' {
+        address = host_of(from) + address
+    }
+    return (slot, address)
+}
+
+// One node of a CLUSTER SLOTS range: host, port, id, ...
+fn node_address(value: Value, default_host: String) String {
+    let host = (value.get(0) !? Value.null()).to_string()
+    let port = (value.get(1) !? Value.null()).to_uint()
+    if port == 0 || host == "?" : return ""
+    if host.length == 0 : host = default_host
+    return join_host_port(host, port)
+}
+
+fn join_host_port(host: String, port: uint) String {
+    if host.contains_byte(':') : return "[%{host}]:%{port}"
+    return "%{host}:%{port}"
+}
+
+// host:port, also [::1]:port
+fn split_host_port(address: String) (String, u32) {
+    let colon = last_colon(address)
+    if colon == 0 : return (address, 6379)
+    let host = address.range(0, colon).trim("[").trim("]")
+    let port = (address.range(colon + 1, address.length - colon - 1).to_uint() !? 6379).to(u32)
+    return (host, port)
+}
+
+fn host_of(address: String) String {
+    let colon = last_colon(address)
+    return colon > 0 ? address.range(0, colon) : address
+}
+
+fn last_colon(text: String) uint {
+    let i = text.length
+    while i > 0 {
+        i--
+        if text[i] == ':' : return i
+    }
+    return 0
+}
+
+fn throw_no_node() !Error $throw {
+    throw .cluster { error_code: "CLUSTERDOWN", message: "No node of the cluster is known" }
+}

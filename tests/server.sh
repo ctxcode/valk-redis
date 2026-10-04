@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Starts or stops the Redis servers the tests run against: a plain one, one that only accepts
 # TLS, with a self-signed certificate generated here, and one that also wants a client
-# certificate signed by a test CA generated here.
+# certificate signed by a test CA generated here. Also a primary with a replica behind a sentinel,
+# and a cluster of three primaries with a replica each.
 set -e
 
 NAME=valk-redis-test
@@ -16,6 +17,8 @@ MTLS_PORT=${REDIS_MTLS_PORT:-6404}
 MASTER_PORT=${REDIS_MASTER_PORT:-6401}
 REPLICA_PORT=${REDIS_REPLICA_PORT:-6402}
 SENTINEL_PORT=${REDIS_SENTINEL_PORT:-6403}
+CLUSTER_NAME=valk-redis-cluster
+CLUSTER_PORT=${REDIS_CLUSTER_PORT:-7101} # six nodes from here, bus ports 10000 higher
 IMAGE=${REDIS_IMAGE:-redis:7-alpine}
 CERTS="$(cd "$(dirname "$0")" && pwd)/certs"
 
@@ -104,9 +107,58 @@ CONF
                 redis-sentinel /etc/sentinel.conf >/dev/null
         fi
         echo "redis primary on 127.0.0.1:${MASTER_PORT}, replica on ${REPLICA_PORT}, sentinel on ${SENTINEL_PORT}"
+
+        # A cluster of three primaries with a replica each
+        NODES=""
+        for i in 0 1 2 3 4 5; do
+            port=$((CLUSTER_PORT + i))
+            NODES="${NODES} 127.0.0.1:${port}"
+            if [ -n "$(docker ps -aq -f name=^${CLUSTER_NAME}-${i}$)" ]; then
+                docker start ${CLUSTER_NAME}-${i} >/dev/null
+            else
+                docker run -d --name ${CLUSTER_NAME}-${i} --network host ${IMAGE} \
+                    redis-server --port ${port} --cluster-enabled yes \
+                    --cluster-node-timeout 2000 --cluster-announce-ip 127.0.0.1 \
+                    --repl-ping-replica-period 1 \
+                    --appendonly no --save "" >/dev/null
+            fi
+        done
+        for i in $(seq 50); do
+            docker exec ${CLUSTER_NAME}-0 redis-cli -p ${CLUSTER_PORT} ping >/dev/null 2>&1 && break
+            sleep 0.2
+        done
+        if ! docker exec ${CLUSTER_NAME}-0 redis-cli -p ${CLUSTER_PORT} cluster info | grep -q "cluster_slots_assigned:16384"; then
+            for i in $(seq 50); do
+                ok=1
+                for n in ${NODES}; do
+                    docker exec ${CLUSTER_NAME}-0 redis-cli -p ${n##*:} ping >/dev/null 2>&1 || ok=0
+                done
+                [ $ok = 1 ] && break
+                sleep 0.2
+            done
+            docker exec ${CLUSTER_NAME}-0 redis-cli --cluster create ${NODES} \
+                --cluster-replicas 1 --cluster-yes >/dev/null
+        fi
+        for i in $(seq 100); do
+            docker exec ${CLUSTER_NAME}-0 redis-cli -p ${CLUSTER_PORT} cluster info | grep -q "cluster_state:ok" && break
+            sleep 0.2
+        done
+        # Until every node lists all six in CLUSTER SLOTS, which leaves out a replica that has
+        # not replicated anything yet
+        PORTS="^($(seq -s '|' ${CLUSTER_PORT} $((CLUSTER_PORT + 5))))$"
+        for i in $(seq 150); do
+            ready=0
+            for n in ${NODES}; do
+                [ "$(docker exec ${CLUSTER_NAME}-0 redis-cli -p ${n##*:} cluster slots | grep -cE "${PORTS}")" = 6 ] && ready=$((ready + 1))
+            done
+            [ $ready = 6 ] && break
+            sleep 0.2
+        done
+        echo "redis cluster on 127.0.0.1:${CLUSTER_PORT}-$((CLUSTER_PORT + 5))"
         ;;
     down)
-        docker rm -f ${NAME} ${TLS_NAME} ${MTLS_NAME} ${MASTER_NAME} ${REPLICA_NAME} ${SENTINEL_NAME} >/dev/null 2>&1 || true
+        docker rm -f ${NAME} ${TLS_NAME} ${MTLS_NAME} ${MASTER_NAME} ${REPLICA_NAME} ${SENTINEL_NAME} \
+            ${CLUSTER_NAME}-0 ${CLUSTER_NAME}-1 ${CLUSTER_NAME}-2 ${CLUSTER_NAME}-3 ${CLUSTER_NAME}-4 ${CLUSTER_NAME}-5 >/dev/null 2>&1 || true
         rm -rf "${CERTS}"
         echo "removed the test servers"
         ;;
