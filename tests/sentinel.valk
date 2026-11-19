@@ -115,7 +115,7 @@ synctest "A failover reaches the next connection" {
     before.close()
 
     let name = stopped_port == PRIMARY_PORT ? "valk-redis-master" : "valk-redis-replica"
-    let code, output = core.exec("docker stop " + name)
+    let code, _ = core.exec("docker stop " + name)
     assert(code == 0)
 
     // The sentinel notices within a second and promotes the other one
@@ -137,7 +137,7 @@ synctest "A failover reaches the next connection" {
     assert(promoted != stopped_port.to(uint))
 
     // Put it back, as a replica of whoever won
-    let started, started_output = core.exec("docker start " + name)
+    let _, _ = core.exec("docker start " + name)
     time.sleep_ms(1000)
 }
 

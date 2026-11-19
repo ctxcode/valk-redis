@@ -107,7 +107,7 @@ value MAX_DEPTH (64)
     ~ saw_readonly: bool (false)
 
     // A connection is a socket, not a value: a clone is the same connection
-    fn clone() SELF $clone {
+    fn clone() SELF {
         return this
     }
 

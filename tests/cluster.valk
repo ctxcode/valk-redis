@@ -4,14 +4,14 @@ use valk.net
 // A server that answers one command with a canned reply, to check how this package reads the
 // answers a cluster gives. A real cluster is not needed for that, and the replies below are
 // what Redis sends word for word.
-fn canned_server(reply: String) (shared net.TcpServer, u16) !net.NetError {
+fn canned_server(reply: String) (atomic net.TcpServer, u16) !net.NetError {
     let server = net.tcp_server("127.0.0.1", 0) !>
     let port = (server.local_address() !>).port
     co serve_once(server, reply)
     return (server, port)
 }
 
-fn serve_once(server: shared net.TcpServer, reply: String) {
+fn serve_once(server: atomic net.TcpServer, reply: String) {
     let con = server.accept(5000) ! return
     let buffer = [u8]{ 0 x 4096 }
     con.read(buffer) ! { con.close() _ return }
