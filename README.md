@@ -7,7 +7,7 @@ dependencies: it speaks RESP over `valk.net` and needs nothing installed besides
 Works with Redis and Valkey, over RESP2 (every version) or RESP3 (Redis 6 and newer), with or
 without TLS.
 
-Requires Valk 0.7.5 or newer.
+Requires Valk 0.8.10 or newer.
 
 ## Install
 
@@ -51,8 +51,12 @@ on their own: `con.set("n", 42)` and `con.run(.{ "EXPIRE", key, 60 })` need no f
 // host, port, password, database, username, connect timeout in ms, protocol
 let con = redis.connect("127.0.0.1", 6379, "secret", 0, "", 5000, 3) ! panic("%{E.message}")
 
-// Or from a URL: rediss:// connects over TLS
+// Or from a URL: rediss:// connects over TLS, unix:// over a Unix domain socket
 let con = redis.connect_url("rediss://default:secret@cache.example.com:6380/2") ! panic("%{E.message}")
+let con = redis.connect_url("unix://:secret@/var/run/redis/redis.sock?db=2") ! panic("%{E.message}")
+
+// Or directly over a Unix domain socket
+let con = redis.connect_unix("/var/run/redis/redis.sock", "secret", 2) ! panic("%{E.message}")
 
 // Or from settings, which is also what a pool takes
 let con = redis.connect_with(redis.Config {

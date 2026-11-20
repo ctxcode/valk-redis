@@ -5,7 +5,7 @@ test:
 test-basics:
 	$(vc) build ./tests --test --run --filter "Basics"
 lint:
-	$(vc) build ./src --lint
+	$(vc) build ./src --lint --deny-warnings
 example:
 	$(vc) build ./example --run
 docs:

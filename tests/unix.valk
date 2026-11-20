@@ -1,0 +1,222 @@
+use redis
+use valk.net
+use valk.fs
+use valk.io
+
+#if OS != "win"
+class RespReader {
+    peer: net.TcpConnection
+    buf: ByteBuffer (.new())
+    offset: uint (0)
+
+    fn fill() bool {
+        if this.offset > 0 {
+            this.buf.clear_until(this.offset)
+            this.offset = 0
+        }
+        let scratch = [u8]{ 0 x 512 }
+        let n = this.peer.read(scratch) ! return false
+        if n == 0 : return false
+        this.buf.write(scratch.view(0, n))
+        return true
+    }
+
+    fn read_line() ?String {
+        while true {
+            let found = this.buf.index_of('\n', this.offset) ! {
+                if !this.fill() : return null
+                continue
+            }
+            let len = found - this.offset
+            if len > 0 && this.buf.get(found - 1) == '\r' : len--
+            let line = this.buf.range(this.offset, len)
+            this.offset = found + 1
+            return line
+        }
+    }
+
+    fn read_bytes(count: uint) ?String {
+        while this.buf.length - this.offset < count + 2 {
+            if !this.fill() : return null
+        }
+        let data = this.buf.range(this.offset, count)
+        this.offset += count + 2
+        return data
+    }
+
+    fn read_command() ?Array[String] {
+        let head = this.read_line()
+        if !isset(head) || !head.starts_with("*") : return null
+        let count = head.range(1, head.length - 1).to_uint() ! return null
+        let args = Array[String].new(count)
+        let i: uint = 0
+        while i++ < count {
+            let len_line = this.read_line()
+            if !isset(len_line) || !len_line.starts_with("$") : return null
+            let blen = len_line.range(1, len_line.length - 1).to_uint() ! return null
+            let arg = this.read_bytes(blen)
+            if !isset(arg) : return null
+            args.append(arg)
+        }
+        return args
+    }
+}
+
+fn redis_serve_one(server: atomic net.UnixServer) Array[String] {
+    let seen = Array[String]{}
+    let peer = server.accept(2000) ! return seen
+    defer peer.close() _
+
+    let reader = RespReader { peer: peer }
+    while true {
+        let cmd = reader.read_command()
+        if !isset(cmd) || cmd.length == 0 : break
+        seen.append(cmd.join(" "))
+        let op = cmd.get(0) !? ""
+        if op == "HELLO" {
+            io.write_all(peer, "%2\r\n+server\r\n+fake-unix\r\n+proto\r\n:3\r\n") ! break
+        } else if op == "AUTH" || op == "SELECT" {
+            io.write_all(peer, "+OK\r\n") ! break
+        } else if op == "PING" {
+            io.write_all(peer, "+PONG\r\n") ! break
+        } else if op == "ECHO" {
+            let msg = cmd.get(1) !? ""
+            io.write_all(peer, "$" + msg.length + "\r\n" + msg + "\r\n") ! break
+        } else if op == "QUIT" {
+            io.write_all(peer, "+OK\r\n") _
+            break
+        } else {
+            io.write_all(peer, "-ERR unknown command\r\n") ! break
+        }
+    }
+    return seen
+}
+
+test "Unix URL parsing" {
+    let c1 = redis.config_from_url("unix:///var/run/redis/redis.sock") ! { assert(false) return }
+    assert(c1.unix_socket == "/var/run/redis/redis.sock")
+    assert(c1.password == "")
+    assert(c1.username == "")
+    assert(c1.db == 0)
+    assert(c1.protocol == 2)
+
+    let c2 = redis.config_from_url("unix:///tmp/r.sock?db=2&password=sec%20ret&username=alice&protocol=3") ! { assert(false) return }
+    assert(c2.unix_socket == "/tmp/r.sock")
+    assert(c2.db == 2)
+    assert(c2.password == "sec ret")
+    assert(c2.username == "alice")
+    assert(c2.protocol == 3)
+
+    let c3 = redis.config_from_url("unix://:pass123@/tmp/r.sock?db=1") ! { assert(false) return }
+    assert(c3.unix_socket == "/tmp/r.sock")
+    assert(c3.username == "")
+    assert(c3.password == "pass123")
+    assert(c3.db == 1)
+
+    let c4 = redis.config_from_url("unix://bob:pw@/tmp/r.sock?protocol=3") ! { assert(false) return }
+    assert(c4.unix_socket == "/tmp/r.sock")
+    assert(c4.username == "bob")
+    assert(c4.password == "pw")
+    assert(c4.protocol == 3)
+
+    let bad_empty = false
+    redis.config_from_url("unix://") ! { bad_empty = error_is(E.code, connect) }
+    assert(bad_empty)
+
+    let bad_host = false
+    redis.config_from_url("unix://localhost/tmp/r.sock") ! { bad_host = error_is(E.code, connect) }
+    assert(bad_host)
+}
+
+test "Unix domain socket" {
+    let dir = fs.create_temp_dir("valk-redis-unix-") ! { assert(false) return }
+    defer fs.delete_all(dir) _
+
+    let sock_path = fs.add(dir, "redis.sock")
+    let srv = net.unix_server(sock_path, true) ! { assert(false) return }
+    defer srv.close() _
+
+    // 1. connect_unix with password and db
+    let t1 = co fn() Array[String] {
+        return redis_serve_one(srv)
+    }()
+    let c1 = redis.connect_unix(sock_path, "secret", 2) ! { println(E.message) assert(false) return }
+    assert(c1.db == 2)
+    assert(c1.ping())
+    let echoed = c1.run(.{ "ECHO", "hello-unix" }) ! { assert(false) return }
+    assert(echoed.to_string() == "hello-unix")
+    c1.close()
+    let seen1 = await t1
+    assert(seen1.length == 5)
+    assert((seen1.get(0) !? "") == "AUTH secret")
+    assert((seen1.get(1) !? "") == "SELECT 2")
+    assert((seen1.get(2) !? "") == "PING")
+    assert((seen1.get(3) !? "") == "ECHO hello-unix")
+    assert((seen1.get(4) !? "") == "QUIT")
+
+    // 2. connect_url with unix://user:pass@/path?db=3&protocol=3 (RESP3)
+    let t2 = co fn() Array[String] {
+        return redis_serve_one(srv)
+    }()
+    let c2 = redis.connect_url("unix://alice:secret@" + sock_path + "?db=3&protocol=3") ! { println(E.message) assert(false) return }
+    assert(c2.protocol == 3)
+    assert(c2.db == 3)
+    assert((c2.server_info.get("server") !? "") == "fake-unix")
+    assert(c2.ping())
+    c2.close()
+    let seen2 = await t2
+    assert((seen2.get(0) !? "") == "HELLO 3 AUTH alice secret")
+    assert((seen2.get(1) !? "") == "SELECT 3")
+    assert((seen2.get(2) !? "") == "PING")
+
+    // 3. connect_url with unix:///path?db=1&password=secret
+    let t3 = co fn() Array[String] {
+        return redis_serve_one(srv)
+    }()
+    let c3 = redis.connect_url("unix://" + sock_path + "?db=1&password=secret") ! { println(E.message) assert(false) return }
+    assert(c3.db == 1)
+    assert(c3.ping())
+    c3.close()
+    let seen3 = await t3
+    assert((seen3.get(0) !? "") == "AUTH secret")
+    assert((seen3.get(1) !? "") == "SELECT 1")
+
+    // 4. connect() with host starting with "/"
+    let t4 = co fn() Array[String] {
+        return redis_serve_one(srv)
+    }()
+    let c4 = redis.connect(sock_path) ! { println(E.message) assert(false) return }
+    assert(c4.ping())
+    c4.close()
+    await t4
+
+    // 5. Pool over Unix domain socket (reuses idle connection)
+    let t5 = co fn() Array[String] {
+        return redis_serve_one(srv)
+    }()
+    let pool_cfg = redis.config_from_url("unix://" + sock_path + "?protocol=3") ! { assert(false) return }
+    let pool = redis.Pool.new(pool_cfg, 4, 2)
+    let p1 = pool.get() ! { println(E.message) assert(false) return }
+    assert(p1.ping())
+    pool.put(p1)
+    assert(pool.size == 1)
+    let p2 = pool.get() ! { println(E.message) assert(false) return }
+    assert(p2.ping())
+    pool.put(p2)
+    assert(pool.size == 1)
+    pool.close_idle()
+    assert(pool.size == 0)
+    let seen5 = await t5
+    assert((seen5.get(0) !? "") == "HELLO 3")
+    assert((seen5.get(1) !? "") == "PING")
+    assert((seen5.get(2) !? "") == "PING")
+    assert((seen5.get(3) !? "") == "QUIT")
+
+    // 6. Missing socket fails cleanly with .connect
+    let missing = false
+    redis.connect_unix(fs.add(dir, "missing.sock")) ! {
+        missing = error_is(E.code, connect)
+    }
+    assert(missing)
+}
+#end

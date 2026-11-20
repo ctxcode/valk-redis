@@ -10,9 +10,8 @@ value MAX_DEPTH (64)
 /// `connect`, `connect_url` and `Pool` all end up here.
 + fn connect_with(config: Config) Connection !Error {
     if config.protocol != 2 && config.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
-    let sock = net.tcp_client(config.host, config.port.to(u16), config.timeout_ms) ! {
-        throw .connect { message: "Failed to connect to %{config.host}:%{config.port}" }
-    }
+    let unix_path = config.unix_socket.length > 0 ? config.unix_socket : (config.host.starts_with("/") ? config.host : "")
+    let sock = dial_socket(config, unix_path) !>
 
     let tls = config.tls
     if isset(tls) {
@@ -54,6 +53,17 @@ value MAX_DEPTH (64)
     }
 
     return con
+}
+
+fn dial_socket(config: Config, unix_path: String) net.TcpConnection !Error {
+    if unix_path.length > 0 {
+        return net.unix_client(unix_path, config.timeout_ms) ! {
+            throw .connect { message: "Failed to connect to Unix socket '%{unix_path}'" }
+        }
+    }
+    return net.tcp_client(config.host, config.port.to(u16), config.timeout_ms) ! {
+        throw .connect { message: "Failed to connect to %{config.host}:%{config.port}" }
+    }
 }
 
 /// A `Connection` or a `Cluster`: something that runs commands.

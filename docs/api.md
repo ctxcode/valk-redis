@@ -31,7 +31,7 @@ Namespaces: [main](#main)
 ## Functions for 'main'
 
 ```js
-// Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
+// Reads a `redis://`, `rediss://` or `unix://` URL as a `Config`, for a pool or a changed setting.
 + fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
@@ -39,6 +39,8 @@ Namespaces: [main](#main)
 + fn connect_cluster(config: ClusterConfig) Cluster !Error
 // Asks the sentinels where the primary is, and connects to it.
 + fn connect_sentinel(config: SentinelConfig) Connection !Error
+// Opens a connection over a Unix domain socket and logs in.
++ fn connect_unix(path: String, password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
 // Opens a connection described by a URL.
 + fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
 // Opens a connection described by a `Config` and logs in.
@@ -381,7 +383,7 @@ Namespaces: [main](#main)
 + class Config {
     // The database to select, 0 being the default one.
     + db: uint
-    // Host name or address of the server.
+    // Host name or address of the server, or a Unix domain socket path starting with `/`.
     + host: String
     // The password, or "" for a server without one.
     + password: String
@@ -393,6 +395,8 @@ Namespaces: [main](#main)
     + timeout_ms: uint
     // TLS settings, or null for a connection without TLS.
     + tls: ?TlsOptions
+    // Path to a Unix domain socket, or "" to connect over TCP using `host` and `port`.
+    + unix_socket: String
     // The ACL user name, or "" to log in with the password alone.
     + username: String
 }

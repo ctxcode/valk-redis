@@ -63,7 +63,7 @@ integers that do not fit, and `verbatim` for text with a format hint in `code`.
 ## Functions for 'main'
 
 ```js
-// Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
+// Reads a `redis://`, `rediss://` or `unix://` URL as a `Config`, for a pool or a changed setting.
 + fn config_from_url(text: String, timeout_ms: uint (5000)) Config !Error
 // Opens a connection and logs in.
 + fn connect(host: String ("127.0.0.1"), port: u32 (6379), password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
@@ -71,6 +71,8 @@ integers that do not fit, and `verbatim` for text with a format hint in `code`.
 + fn connect_cluster(config: ClusterConfig) Cluster !Error
 // Asks the sentinels where the primary is, and connects to it.
 + fn connect_sentinel(config: SentinelConfig) Connection !Error
+// Opens a connection over a Unix domain socket and logs in.
++ fn connect_unix(path: String, password: String (""), db: uint (0), username: String (""), timeout_ms: uint (5000), protocol: uint (2)) Connection !Error
 // Opens a connection described by a URL.
 + fn connect_url(text: String, timeout_ms: uint (5000)) Connection !Error
 // Opens a connection described by a `Config` and logs in.
@@ -83,7 +85,7 @@ integers that do not fit, and `verbatim` for text with a format hint in `code`.
 
 ### config_from_url
 
-Reads a `redis://` or `rediss://` URL as a `Config`, for a pool or a changed setting.
+Reads a `redis://`, `rediss://` or `unix://` URL as a `Config`, for a pool or a changed setting.
 
 ### connect
 
@@ -130,13 +132,23 @@ let con = redis.connect_sentinel(redis.SentinelConfig {
 A pool made with `Pool.from_sentinel` opens its connections this way, and follows a
 failover.
 
+### connect_unix
+
+Opens a connection over a Unix domain socket and logs in.
+
+```valk
+let con = redis.connect_unix("/var/run/redis/redis.sock") ! panic("%{E.message}")
+```
+
 ### connect_url
 
 Opens a connection described by a URL.
 
-`redis://` is a plain connection and `rediss://` one over TLS. The URL may carry the
-credentials and the database: `rediss://default:secret@cache.example.com:6380/2`. A
-`protocol=3` in the query string asks for RESP3.
+`redis://` is a plain TCP connection, `rediss://` one over TLS, and `unix://` one over a
+Unix domain socket. The URL may carry the credentials and the database:
+`rediss://default:secret@cache.example.com:6380/2` or
+`unix://:secret@/var/run/redis/redis.sock?db=2`. A `protocol=3` in the query string asks
+for RESP3.
 
 ### connect_with
 
@@ -1237,7 +1249,7 @@ A command that failed is an `error` value in the result rather than a thrown err
 + class Config {
     // The database to select, 0 being the default one.
     + db: uint
-    // Host name or address of the server.
+    // Host name or address of the server, or a Unix domain socket path starting with `/`.
     + host: String
     // The password, or "" for a server without one.
     + password: String
@@ -1249,6 +1261,8 @@ A command that failed is an `error` value in the result rather than a thrown err
     + timeout_ms: uint
     // TLS settings, or null for a connection without TLS.
     + tls: ?TlsOptions
+    // Path to a Unix domain socket, or "" to connect over TCP using `host` and `port`.
+    + unix_socket: String
     // The ACL user name, or "" to log in with the password alone.
     + username: String
 }
@@ -1267,7 +1281,7 @@ The database to select, 0 being the default one.
 
 #### host
 
-Host name or address of the server.
+Host name or address of the server, or a Unix domain socket path starting with `/`.
 
 #### password
 
@@ -1288,6 +1302,10 @@ How long connecting may take, in milliseconds.
 #### tls
 
 TLS settings, or null for a connection without TLS.
+
+#### unix_socket
+
+Path to a Unix domain socket, or "" to connect over TCP using `host` and `port`.
 
 #### username
 
