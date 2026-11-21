@@ -121,7 +121,7 @@ trait StreamCommands {
         let args = Array[String]{ "XGROUP", "CREATE", key, group, id }
         if create_stream : args.append("MKSTREAM")
         this.run(args) ! {
-            if error_is(E.code, server) && E.error_code == "BUSYGROUP" : return false
+            if E is .server && E.error_code == "BUSYGROUP" : return false
             throw E
         }
         return true

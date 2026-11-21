@@ -1,20 +1,54 @@
 /// Thrown by every operation of this package.
 ///
-/// - `connect`: the TCP connection could not be opened, or reading and writing failed.
-/// - `tls`: the TLS handshake failed, or its settings could not be used.
-/// - `auth`: the server rejected the credentials, or asked for credentials that were not given.
-/// - `protocol`: the server sent bytes this package did not expect.
-/// - `server`: the server answered with an error reply. `error_code` holds its first word, such as
+/// - `connect(message)`: the TCP connection could not be opened, or reading and writing failed.
+/// - `tls(message)`: the TLS handshake failed, or its settings could not be used.
+/// - `auth(message, error_code)`: the server rejected the credentials, or asked for credentials that were not given.
+/// - `protocol(message)`: the server sent bytes this package did not expect.
+/// - `server(message, error_code)`: the server answered with an error reply. `error_code` holds its first word, such as
 ///   `WRONGTYPE` or `NOSCRIPT`, and `message` the whole text.
-/// - `cluster`: the server is part of a cluster and answered that the command belongs somewhere
+/// - `cluster(message, error_code)`: the server is part of a cluster and answered that the command belongs somewhere
 ///   else, or that the cluster is not serving it. A `Connection` does not follow redirects; a
 ///   `Cluster` does, and throws this when it gave up or when the keys of a command are in
 ///   different slots. `error_code` holds the word the server used (`MOVED`, `ASK`,
 ///   `CROSSSLOT`, `CLUSTERDOWN` or `TRYAGAIN`) and `message` explains what it means.
-/// - `timeout`: a read ran past the connection timeout.
-/// - `type`: the reply had another shape than the called method expects.
-/// - `closed`: the connection is closed.
-+ error Error (connect, tls, auth, protocol, server, cluster, timeout, type, closed) payload {
-    message: String
-    error_code: String ("")
+/// - `timeout(message)`: a read ran past the connection timeout.
+/// - `type(message)`: the reply had another shape than the called method expects.
+/// - `closed(message)`: the connection is closed.
++ union Error {
+    connect(String)
+    tls(String)
+    auth(String, String)
+    protocol(String)
+    server(String, String)
+    cluster(String, String)
+    timeout(String)
+    type(String)
+    closed(String)
+
+    + get message: String {
+        return match this : String {
+            .connect(msg) => msg
+            .tls(msg) => msg
+            .auth(msg, _) => msg
+            .protocol(msg) => msg
+            .server(msg, _) => msg
+            .cluster(msg, _) => msg
+            .timeout(msg) => msg
+            .type(msg) => msg
+            .closed(msg) => msg
+        }
+    }
+
+    + get error_code: String {
+        return match this : String {
+            .auth(_, code) => code
+            .server(_, code) => code
+            .cluster(_, code) => code
+            default => ""
+        }
+    }
+
+    + fn to_string() String $auto {
+        return this.message
+    }
 }

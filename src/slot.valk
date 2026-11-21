@@ -91,7 +91,7 @@ fn add_commands(map: Map[uint], kind: uint, names: String) {
 // Returns the slot the keys of a command hash to, or -1 for a command without keys, and
 // whether the command only reads. Keys in different slots throw `cluster` with `CROSSSLOT`.
 fn command_slot(args: Array[String]) (int, bool) !Error {
-    if args.length == 0 : throw .server { message: "No command was given" }
+    if args.length == 0 : throw .server("No command was given", "")
     let name = (args.get(0) !? "").upper()
     let spec = COMMAND_KEYS.get(name) !? KEYS_FIRST
     let read = (spec & READ_ONLY) != 0
@@ -103,10 +103,7 @@ fn command_slot(args: Array[String]) (int, bool) !Error {
     let step: uint = 1
     if kind == KEYS_NONE : return (-1, read)
     if kind == KEYS_REFUSED {
-        throw .cluster {
-            error_code: name
-            message: "`" + name + "` needs one connection for several commands; take one from `Cluster.connection_for(key)`"
-        }
+        throw .cluster("`" + name + "` needs one connection for several commands; take one from `Cluster.connection_for(key)`", name)
     }
     if kind == KEYS_FIRST : end = 2
     else if kind == KEYS_PAIRS : step = 2
@@ -157,8 +154,8 @@ fn check_same_slot(args: Array[String], from: uint, end: uint, step: uint, slot:
 }
 
 fn throw_cross_slot() !Error $throw {
-    throw .cluster {
-        error_code: "CROSSSLOT"
-        message: "The keys of this command live in different slots of the cluster, and a command may only touch keys of one node. Give the keys that belong together the same hash tag, as in `{user:1}:name`, or send one command per key."
-    }
+    throw .cluster(
+        "The keys of this command live in different slots of the cluster, and a command may only touch keys of one node. Give the keys that belong together the same hash tag, as in `{user:1}:name`, or send one command per key.",
+        "CROSSSLOT"
+    )
 }

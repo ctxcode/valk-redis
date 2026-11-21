@@ -8,9 +8,10 @@ test "Errors" {
     con.del("err:list") ! { assert(false) return }
     con.rpush("err:list", "a") ! { assert(false) return }
     con.get("err:list") ! {
-        assert(error_is(E.code, server))
+        assert(E is .server)
         assert(E.error_code == "WRONGTYPE")
         assert(E.message.length > 0)
+        assert(E.to_string() == E.message)
     }
     // The connection is still usable after a server error
     assert((con.llen("err:list") !? 0) == 1)
@@ -20,7 +21,7 @@ test "Errors" {
     con.close()
     assert(con.closed)
     con.get("err:list") ! {
-        assert(error_is(E.code, closed))
+        assert(E is .closed)
         return
     }
     assert(false)
@@ -29,7 +30,8 @@ test "Errors" {
 test "Cannot connect" {
     // Nothing listens on this port
     redis.connect("127.0.0.1", 6300) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
+        assert(E.to_string() == E.message)
         return
     }
     assert(false)
@@ -38,7 +40,7 @@ test "Cannot connect" {
 test "Wrong password" {
     // The test server has no password, so sending one is rejected
     redis.connect("127.0.0.1", TEST_PORT, "not-the-password") ! {
-        assert(error_is(E.code, auth))
+        assert(E is .auth)
         return
     }
     assert(false)
@@ -71,7 +73,7 @@ test "Values" {
     assert((list.get(0) ! { assert(false) return }).to_string() == "a")
     assert(list.to_strings().length == 3)
     assert(!isset(list.to_strings_or_null().get(2) !? "x"))
-    list.get(9) ! { assert(error_is(E.code, missing)) }
+    list.get(9) ! { assert(E is .missing) }
 
     // A field/value reply reads as a map whether it is flat or a RESP3 map
     let flat = redis.Value.of_array(.{ redis.Value.of("name"), redis.Value.of("valk"), redis.Value.of("n") })

@@ -31,10 +31,11 @@ test "Cluster redirect" {
 
     con.get("user:1") ! {
         // Not a plain `server` error: the program has to do something different
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "MOVED")
         assert(E.message.contains("127.0.0.1:6381"))
         assert(E.message.contains("does not follow cluster redirects"))
+        assert(E.to_string() == E.message)
         return
     }
     assert(false)
@@ -47,7 +48,7 @@ test "Cluster slot is moving" {
     defer con.close()
 
     con.get("user:1") ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "ASK")
         assert(E.message.contains("127.0.0.1:6382"))
         assert(E.message.contains("slot is moving"))
@@ -63,7 +64,7 @@ test "Cluster keys in different slots" {
     defer con.close()
 
     con.mget(.{ "a", "b" }) ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "CROSSSLOT")
         assert(E.message.contains("hash tag"))
         return
@@ -78,7 +79,7 @@ test "Cluster is down" {
     defer con.close()
 
     con.get("x") ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "CLUSTERDOWN")
         return
     }
@@ -92,7 +93,7 @@ test "Cluster asks to try again" {
     defer con.close()
 
     con.get("x") ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "TRYAGAIN")
         assert(E.message.contains("retried"))
         return
@@ -107,7 +108,7 @@ test "An ordinary error stays a server error" {
     defer con.close()
 
     con.get("x") ! {
-        assert(error_is(E.code, server))
+        assert(E is .server)
         assert(E.error_code == "WRONGTYPE")
         return
     }

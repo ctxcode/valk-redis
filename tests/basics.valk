@@ -87,7 +87,7 @@ test "Raw commands" {
 
     // An unknown command is reported by the server, not by this package
     con.run(.{ "NOSUCHCOMMAND" }) ! {
-        assert(error_is(E.code, server))
+        assert(E is .server)
         assert(E.error_code == "ERR")
         con.del("raw:n") _
         return

@@ -110,7 +110,7 @@ class Shard {
             let asking = isset(ask)
             ask = null
             let reply = this.send(target, args, asking) ! {
-                if !error_is(E.code, connect) && !error_is(E.code, closed) : throw E
+                if !(E is .connect) && !(E is .closed) : throw E
                 if retries >= this.config.max_retries : throw E
                 this.wait(retries++)
                 this.refresh() _
@@ -202,7 +202,7 @@ class Shard {
             index = this.slots.get(slot.to(uint)) !? 0
         }
         let shard = this.shards.get(index - 1) ! {
-            throw .cluster { error_code: "CLUSTERDOWN", message: "No node of the cluster serves slot %{slot}" }
+            throw .cluster("No node of the cluster serves slot %{slot}", "CLUSTERDOWN")
         }
         if replica && shard.replicas.length > 0 {
             return shard.replicas.get(shard.next++ % shard.replicas.length) !? shard.primary
@@ -238,7 +238,7 @@ class Shard {
         each this.config.nodes as address {
             candidates.append(address, true)
         }
-        if candidates.length == 0 : throw .connect { message: "No node of the cluster was given" }
+        if candidates.length == 0 : throw .connect("No node of the cluster was given")
 
         let last_message = ""
         let answered = false
@@ -262,8 +262,8 @@ class Shard {
             return
         }
         let message = "No node of the cluster could tell where the slots are: " + last_message
-        if answered : throw .cluster { error_code: "CLUSTERDOWN", message: message }
-        throw .connect { message: message }
+        if answered : throw .cluster(message, "CLUSTERDOWN")
+        throw .connect(message)
     }
 
     // Reads a CLUSTER SLOTS reply: start, end, primary, replicas... per range
@@ -444,7 +444,7 @@ class Shard {
 /// }) ! panic("%{E.message}")
 /// ```
 + fn connect_cluster(config: ClusterConfig) Cluster !Error {
-    if config.protocol != 2 && config.protocol != 3 : throw .connect { message: "Only protocol 2 and 3 exist" }
+    if config.protocol != 2 && config.protocol != 3 : throw .connect("Only protocol 2 and 3 exist")
     let cluster = Cluster { config: config }
     cluster.refresh() !>
     return cluster
@@ -636,5 +636,5 @@ fn last_colon(text: String) uint {
 }
 
 fn throw_no_node() !Error $throw {
-    throw .cluster { error_code: "CLUSTERDOWN", message: "No node of the cluster is known" }
+    throw .cluster("No node of the cluster is known", "CLUSTERDOWN")
 }

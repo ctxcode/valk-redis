@@ -120,7 +120,7 @@ use valk.time
 
             // Wait for another coroutine on this thread to give one back
             if deadline > 0 && time.mono_us() >= deadline {
-                throw .timeout { message: "No connection came back within %{this.wait_timeout_ms}ms" }
+                throw .timeout("No connection came back within %{this.wait_timeout_ms}ms")
             }
             time.sleep_ms(1)
         }

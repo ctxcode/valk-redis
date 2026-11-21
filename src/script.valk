@@ -77,7 +77,7 @@ fn eval_args(command: String, script: String, keys: Array[String], args: Array[S
     /// `con` is a `Connection` or a `Cluster`.
     + fn run(con: Client, keys: Array[String] (.{}), args: Array[String] (.{})) Value !Error {
         return con.run(eval_args("EVALSHA", this.sha, keys, args)) ! {
-            if error_is(E.code, server) && E.error_code == "NOSCRIPT" {
+            if E is .server && E.error_code == "NOSCRIPT" {
                 return con.run(eval_args("EVAL", this.source, keys, args)) !>
             }
             throw E

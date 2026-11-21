@@ -56,7 +56,7 @@ test "When no sentinel can name the primary" {
     let unknown = sentinel_config()
     unknown.master_name = "not-watched-by-anyone"
     redis.connect_sentinel(unknown) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         assert(E.message.contains("not-watched-by-anyone"))
         assert(E.message.contains("does not watch"))
     }
@@ -65,14 +65,14 @@ test "When no sentinel can name the primary" {
     let unreachable = sentinel_config()
     unreachable.sentinels = .{ "127.0.0.1:6300" }
     redis.connect_sentinel(unreachable) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
     }
 
     // An empty list says so rather than looking for one
     let none = sentinel_config()
     none.sentinels = .{}
     redis.connect_sentinel(none) ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         assert(E.message.contains("No sentinel was given"))
         return
     }
@@ -98,7 +98,7 @@ test "The replicas the sentinels know" {
 
     // And refuses writes, which is why a program asks the sentinels for the primary
     replica.set("sentinel:write", "x") ! {
-        assert(error_is(E.code, server))
+        assert(E is .server)
         return
     }
     assert(false)

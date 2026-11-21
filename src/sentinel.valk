@@ -43,7 +43,7 @@
 /// A pool made with `Pool.from_sentinel` opens its connections this way, and follows a
 /// failover.
 + fn connect_sentinel(config: SentinelConfig) Connection !Error {
-    if config.sentinels.length == 0 : throw .connect { message: "No sentinel was given to ask" }
+    if config.sentinels.length == 0 : throw .connect("No sentinel was given to ask")
 
     let last_message = ""
     each config.sentinels as address {
@@ -88,9 +88,7 @@
         con.close()
     }
 
-    throw .connect {
-        message: "No sentinel could name a primary for '" + config.master_name + "'" + (last_message.length > 0 ? ": " + last_message : "")
-    }
+    throw .connect("No sentinel could name a primary for '" + config.master_name + "'" + (last_message.length > 0 ? ": " + last_message : ""))
 }
 
 /// Returns the replicas of the primary, as `host:port`, for reads that may be a moment behind.
@@ -118,7 +116,7 @@
         }
         return out
     }
-    throw .connect { message: "No sentinel could be reached" }
+    throw .connect("No sentinel could be reached")
 }
 
 // `ROLE` answers with the kind first: `master` on a primary

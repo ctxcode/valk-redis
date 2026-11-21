@@ -110,11 +110,11 @@ use valk.url
     let parts = url.parse(text)
     if parts.scheme == "unix" {
         if parts.host.length > 0 {
-            throw .connect { message: "A unix URL must start with unix:///path or unix://user:pass@/path" }
+            throw .connect("A unix URL must start with unix:///path or unix://user:pass@/path")
         }
         let socket_path = url.decode(parts.path)
         if socket_path.length == 0 {
-            throw .connect { message: "The unix URL has no socket path" }
+            throw .connect("The unix URL has no socket path")
         }
         let password = url.decode(parts.password)
         let username = url.decode(parts.user)
@@ -126,13 +126,13 @@ use valk.url
                 let key = pair.range(0, split)
                 let val = pair.range(split + 1, pair.length - split - 1)
                 if key == "db" {
-                    db = val.to_uint() ! throw .connect { message: "'" + val + "' is not a database number" }
+                    db = val.to_uint() ! throw .connect("'" + val + "' is not a database number")
                 } else if key == "password" {
                     password = url.decode(val)
                 } else if key == "username" {
                     username = url.decode(val)
                 } else if key == "protocol" {
-                    protocol = val.to_uint() ! throw .connect { message: "The protocol in the URL is not 2 or 3" }
+                    protocol = val.to_uint() ! throw .connect("The protocol in the URL is not 2 or 3")
                 }
             }
         }
@@ -149,20 +149,20 @@ use valk.url
     let tls: ?TlsOptions = null
     if parts.scheme == "rediss" : tls = TlsOptions {}
     else if parts.scheme != "redis" && parts.scheme != "" {
-        throw .connect { message: "'" + parts.scheme + "' is not a redis URL scheme" }
+        throw .connect("'" + parts.scheme + "' is not a redis URL scheme")
     }
 
     let db: uint = 0
     let path = parts.path.trim("/")
     if path.length > 0 {
-        db = path.to_uint() ! throw .connect { message: "'" + path + "' is not a database number" }
+        db = path.to_uint() ! throw .connect("'" + path + "' is not a database number")
     }
     let protocol: uint = 2
     if parts.query.length > 0 {
         each parts.query.split("&") as pair {
             let split = pair.index_of_byte('=') ! continue
             if pair.range(0, split) != "protocol" : continue
-            protocol = pair.range(split + 1, pair.length - split - 1).to_uint() ! throw .connect { message: "The protocol in the URL is not 2 or 3" }
+            protocol = pair.range(split + 1, pair.length - split - 1).to_uint() ! throw .connect("The protocol in the URL is not 2 or 3")
         }
     }
 

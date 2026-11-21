@@ -31,7 +31,7 @@
         let count = this.count
         this.count = 0
         if count == 0 : return .{}
-        if this.con.closed : throw .closed { message: "The connection is closed" }
+        if this.con.closed : throw .closed("The connection is closed")
         this.con.flush() !>
         let out = Array[Value].new(count)
         let i: uint = 0

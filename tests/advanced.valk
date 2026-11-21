@@ -88,7 +88,7 @@ test "Scripts" {
 
     // An unknown sha is reported as NOSCRIPT
     con.evalsha("0000000000000000000000000000000000000000") ! {
-        assert(error_is(E.code, server))
+        assert(E is .server)
         assert(E.error_code == "NOSCRIPT")
         con.del("script:key") _
         return

@@ -14,13 +14,6 @@ Namespaces: [main](#main)
 + value SLOT_COUNT (16384)
 ```
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (connect, tls, auth, protocol, server, cluster, timeout, type, closed) payload { message: String, error_code: String ("") }
-```
-
 ## Enums for 'main'
 
 ```js
@@ -716,6 +709,25 @@ Namespaces: [main](#main)
     + fn zscan(key: String, cursor: uint (0), pattern: String (""), count: uint (0)) (uint, Array[ScoredMember]) !Error
     // Returns the score of a member, or null when it is not in the set.
     + fn zscore(key: String, member: String) ?float !Error
+}
+```
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    connect(String)
+    tls(String)
+    auth(String, String)
+    protocol(String)
+    server(String, String)
+    cluster(String, String)
+    timeout(String)
+    type(String)
+    closed(String)
+
+    + get error_code: String
+    + get message: String
+    + fn to_string() String
 }
 ```
 

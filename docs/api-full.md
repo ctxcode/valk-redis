@@ -18,32 +18,6 @@ Namespaces: [main](#main)
 
 The number of hash slots a Redis cluster divides its keys over.
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package.
-+ error Error (connect, tls, auth, protocol, server, cluster, timeout, type, closed) payload { message: String, error_code: String ("") }
-```
-
-### Error
-
-Thrown by every operation of this package.
-
-- `connect`: the TCP connection could not be opened, or reading and writing failed.
-- `tls`: the TLS handshake failed, or its settings could not be used.
-- `auth`: the server rejected the credentials, or asked for credentials that were not given.
-- `protocol`: the server sent bytes this package did not expect.
-- `server`: the server answered with an error reply. `error_code` holds its first word, such as
-  `WRONGTYPE` or `NOSCRIPT`, and `message` the whole text.
-- `cluster`: the server is part of a cluster and answered that the command belongs somewhere
-  else, or that the cluster is not serving it. A `Connection` does not follow redirects; a
-  `Cluster` does, and throws this when it gave up or when the keys of a command are in
-  different slots. `error_code` holds the word the server used (`MOVED`, `ASK`,
-  `CROSSSLOT`, `CLUSTERDOWN` or `TRYAGAIN`) and `message` explains what it means.
-- `timeout`: a read ran past the connection timeout.
-- `type`: the reply had another shape than the called method expects.
-- `closed`: the connection is closed.
-
 ## Enums for 'main'
 
 ```js
@@ -2388,6 +2362,44 @@ Reads one page of a sorted set, as members with their scores.
 #### zscore
 
 Returns the score of a member, or null when it is not in the set.
+
+```js
+// Thrown by every operation of this package.
++ union Error {
+    connect(String)
+    tls(String)
+    auth(String, String)
+    protocol(String)
+    server(String, String)
+    cluster(String, String)
+    timeout(String)
+    type(String)
+    closed(String)
+
+    + get error_code: String
+    + get message: String
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown by every operation of this package.
+
+- `connect(message)`: the TCP connection could not be opened, or reading and writing failed.
+- `tls(message)`: the TLS handshake failed, or its settings could not be used.
+- `auth(message, error_code)`: the server rejected the credentials, or asked for credentials that were not given.
+- `protocol(message)`: the server sent bytes this package did not expect.
+- `server(message, error_code)`: the server answered with an error reply. `error_code` holds its first word, such as
+  `WRONGTYPE` or `NOSCRIPT`, and `message` the whole text.
+- `cluster(message, error_code)`: the server is part of a cluster and answered that the command belongs somewhere
+  else, or that the cluster is not serving it. A `Connection` does not follow redirects; a
+  `Cluster` does, and throws this when it gave up or when the keys of a command are in
+  different slots. `error_code` holds the word the server used (`MOVED`, `ASK`,
+  `CROSSSLOT`, `CLUSTERDOWN` or `TRYAGAIN`) and `message` explains what it means.
+- `timeout(message)`: a read ran past the connection timeout.
+- `type(message)`: the reply had another shape than the called method expects.
+- `closed(message)`: the connection is closed.
 
 ```js
 // A message from a channel this connection is subscribed to.

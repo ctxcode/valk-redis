@@ -55,7 +55,7 @@ test "Pool limit" {
 
     // The pool is at its limit and nothing comes back
     pool.get() ! {
-        assert(error_is(E.code, timeout))
+        assert(E is .timeout)
         pool.put(a)
         pool.put(b)
         pool.close_idle()

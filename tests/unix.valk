@@ -120,11 +120,11 @@ test "Unix URL parsing" {
     assert(c4.protocol == 3)
 
     let bad_empty = false
-    redis.config_from_url("unix://") ! { bad_empty = error_is(E.code, connect) }
+    redis.config_from_url("unix://") ! { bad_empty = E is .connect }
     assert(bad_empty)
 
     let bad_host = false
-    redis.config_from_url("unix://localhost/tmp/r.sock") ! { bad_host = error_is(E.code, connect) }
+    redis.config_from_url("unix://localhost/tmp/r.sock") ! { bad_host = E is .connect }
     assert(bad_host)
 }
 
@@ -215,7 +215,7 @@ test "Unix domain socket" {
     // 6. Missing socket fails cleanly with .connect
     let missing = false
     redis.connect_unix(fs.add(dir, "missing.sock")) ! {
-        missing = error_is(E.code, connect)
+        missing = E is .connect
     }
     assert(missing)
 }

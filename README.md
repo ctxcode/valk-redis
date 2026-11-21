@@ -7,7 +7,7 @@ dependencies: it speaks RESP over `valk.net` and needs nothing installed besides
 Works with Redis and Valkey, over RESP2 (every version) or RESP3 (Redis 6 and newer), with or
 without TLS.
 
-Requires Valk 0.8.10 or newer.
+Requires Valk 0.9.1 or newer.
 
 ## Install
 
@@ -351,7 +351,7 @@ set.
 
 Every method throws `redis.Error`:
 
-| code | when |
+| variant | when |
 | --- | --- |
 | `connect` | the connection could not be opened, or reading and writing failed |
 | `tls` | the TLS handshake failed, or its settings could not be used |

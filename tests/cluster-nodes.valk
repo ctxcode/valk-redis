@@ -169,7 +169,7 @@ test "Cluster keys of one command share a slot" {
 
     // Without one, the client refuses before anything is sent
     cluster.mget(.{ "valk-a", "valk-b" }) ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "CROSSSLOT")
         assert(E.message.contains("hash tag"))
         return
@@ -182,7 +182,7 @@ test "Cluster commands that need one connection" {
     defer cluster.close()
 
     cluster.run(.{ "MULTI" }) ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.message.contains("connection_for"))
 
         // A transaction on the node of one slot
@@ -301,7 +301,7 @@ synctest "Cluster follows ASK while a slot migrates" {
     impatient.retry_delay_ms = 10
     let other_client = redis.connect_cluster(impatient) ! { assert(false) return }
     other_client.mget(.{ old_key, new_key }) ! {
-        assert(error_is(E.code, cluster))
+        assert(E is .cluster)
         assert(E.error_code == "TRYAGAIN")
     }
     other_client.close()

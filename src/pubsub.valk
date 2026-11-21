@@ -89,7 +89,7 @@ extend Connection {
         let arrived = true
         this.fill() ! {
             this.con.set_timeouts(read_timeout, write_timeout)
-            if error_is(E.code, timeout) : return false
+            if E is .timeout : return false
             throw E
         }
         this.con.set_timeouts(read_timeout, write_timeout)
@@ -123,7 +123,7 @@ extend Connection {
 
     // Sends a subscribe or unsubscribe command and reads its confirmations
     fn subscribe_command(command: String, channels: Array[String]) !Error {
-        if this.closed : throw .closed { message: "The connection is closed" }
+        if this.closed : throw .closed("The connection is closed")
         let args = Array[String]{ command }
         args.append_many(channels)
         this.write_command(args)

@@ -35,7 +35,7 @@ test "TLS" {
 test "TLS rejects an untrusted certificate" {
     // The server certificate is self-signed, so the system authorities do not cover it
     redis.connect_with(redis.Config { host: "localhost", port: TLS_PORT, tls: .{} }) ! {
-        assert(error_is(E.code, tls))
+        assert(E is .tls)
         return
     }
     assert(false)
@@ -98,7 +98,7 @@ test "TLS client certificate errors" {
             key_password: "wrong"
         }
     }) ! {
-        assert(error_is(E.code, tls))
+        assert(E is .tls)
         redis.connect_with(redis.Config {
             host: "localhost"
             port: MTLS_PORT
@@ -108,7 +108,7 @@ test "TLS client certificate errors" {
                 private_key_file: tls_file("server.key")
             }
         }) ! {
-            assert(error_is(E.code, tls))
+            assert(E is .tls)
             return
         }
         assert(false)
@@ -131,7 +131,7 @@ test "TLS without verification" {
 test "TLS is required by that server" {
     // Speaking plain RESP to a TLS port gets nowhere
     let con = redis.connect("localhost", TLS_PORT, "", TEST_DB, "", 2000) ! {
-        assert(error_is(E.code, connect) || error_is(E.code, closed) || error_is(E.code, protocol))
+        assert(E is .connect || E is .closed || E is .protocol)
         return
     }
     con.close()
@@ -164,7 +164,7 @@ test "Connect by URL" {
     assert(isset(config.tls))
 
     redis.config_from_url("http://127.0.0.1") ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         return
     }
     assert(false)
